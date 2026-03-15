@@ -44,6 +44,7 @@ pub const cookie_mod = @import("blitz/cookie.zig");
 pub const compress_mod = @import("blitz/compress.zig");
 pub const log_mod = @import("blitz/log.zig");
 pub const uring_mod = @import("blitz/uring.zig");
+pub const websocket_mod = @import("blitz/websocket.zig");
 
 // Re-export main types for convenience
 pub const Request = types.Request;
@@ -124,6 +125,18 @@ pub const logRequest = log_mod.logRequest;
 pub const logNow = log_mod.now;
 pub const logMsg = log_mod.log;
 
+// WebSocket
+pub const WebSocket = websocket_mod;
+pub const WsOpcode = websocket_mod.Opcode;
+pub const WsCloseCode = websocket_mod.CloseCode;
+pub const WsFrame = websocket_mod.Frame;
+pub const wsParseFrame = websocket_mod.parseFrame;
+pub const wsBuildFrame = websocket_mod.buildFrame;
+pub const wsBuildCloseFrame = websocket_mod.buildCloseFrame;
+pub const wsIsUpgradeRequest = websocket_mod.isUpgradeRequest;
+pub const wsBuildUpgradeResponse = websocket_mod.buildUpgradeResponse;
+pub const wsAcceptKey = websocket_mod.acceptKey;
+
 // io_uring backend
 pub const UringServer = uring_mod.UringServer;
 pub const UringConfig = uring_mod.Config;
@@ -149,4 +162,5 @@ test {
     _ = @import("blitz/cookie.zig");
     _ = @import("blitz/compress.zig");
     _ = @import("blitz/log.zig");
+    _ = @import("blitz/websocket.zig");
 }
