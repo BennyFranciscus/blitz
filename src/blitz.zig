@@ -42,6 +42,7 @@ pub const pool_mod = @import("blitz/pool.zig");
 pub const body_mod = @import("blitz/body.zig");
 pub const cookie_mod = @import("blitz/cookie.zig");
 pub const compress_mod = @import("blitz/compress.zig");
+pub const uring_mod = @import("blitz/uring.zig");
 
 // Re-export main types for convenience
 pub const Request = types.Request;
@@ -113,6 +114,10 @@ pub const shouldCompress = compress_mod.shouldCompress;
 pub const compressResponse = compress_mod.compressResponse;
 pub const gzipCompressSlice = compress_mod.gzipCompressSlice;
 pub const deflateCompressSlice = compress_mod.deflateCompressSlice;
+
+// io_uring backend
+pub const UringServer = uring_mod.UringServer;
+pub const UringConfig = uring_mod.Config;
 
 // Graceful shutdown
 pub const isShuttingDown = server_mod.isShuttingDown;

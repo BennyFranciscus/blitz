@@ -276,11 +276,21 @@ pub fn main() !void {
     router.post("/upload", handleUpload);
     router.get("/static/*filepath", handleStatic);
 
-    // Start server
-    var server = blitz.Server.init(&router, .{
-        .port = 8080,
-        .keep_alive_timeout = 0, // disable for benchmarks
-        .compression = false, // disable for benchmarks — rawResponse handles most routes
-    });
-    try server.listen();
+    // Check if io_uring backend is requested
+    const use_uring = if (std.posix.getenv("BLITZ_URING")) |val| mem.eql(u8, val, "1") else false;
+
+    if (use_uring) {
+        var uring_server = blitz.UringServer.init(&router, .{
+            .port = 8080,
+            .compression = false,
+        });
+        try uring_server.listen();
+    } else {
+        var server = blitz.Server.init(&router, .{
+            .port = 8080,
+            .keep_alive_timeout = 0,
+            .compression = false,
+        });
+        try server.listen();
+    }
 }
