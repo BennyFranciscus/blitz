@@ -18,6 +18,7 @@ A blazing-fast HTTP/1.1 micro web framework for Zig.
 - **Request body parsing** — URL-encoded forms and multipart/form-data with typed access
 - **Cookie support** — parse request cookies and set response cookies with full RFC 6265 options
 - **Redirect helpers** — `redirect`, `redirectTemp`, `redirectPerm` for clean navigation
+- **Graceful shutdown** — handles SIGTERM/SIGINT, drains in-flight connections, configurable timeout
 - **Keep-alive timeout** — automatic idle connection cleanup via timerfd
 - **Structured errors** — consistent JSON error responses out of the box
 - **Clean API** — define routes and handlers, blitz handles the rest
@@ -466,8 +467,32 @@ var server = blitz.Server.init(&router, .{
     .port = 8080,
     .threads = null, // auto-detect CPU count
     .keep_alive_timeout = 60, // seconds (0 = disable)
+    .shutdown_timeout = 30, // seconds to drain before force-close
 });
-try server.listen();
+try server.listen(); // Blocks until SIGTERM/SIGINT
+```
+
+### Graceful Shutdown
+
+Blitz handles `SIGTERM` and `SIGINT` automatically:
+
+1. **Stops accepting** new connections immediately
+2. **Finishes in-flight** requests and flushes responses
+3. **Sends `Connection: close`** to signal clients
+4. **Drains** for up to `shutdown_timeout` seconds
+5. **Force-closes** remaining connections if timeout expires
+
+Works correctly as PID 1 in Docker containers. Check `blitz.isShuttingDown()` in middleware or handlers to detect shutdown in progress.
+
+```zig
+// Middleware that rejects new work during shutdown
+fn shutdownAware(req: *blitz.Request, res: *blitz.Response) bool {
+    if (blitz.isShuttingDown()) {
+        _ = res.setStatus(.service_unavailable).text("Shutting down");
+        return false;
+    }
+    return true;
+}
 ```
 
 ## Architecture
@@ -479,7 +504,7 @@ src/
 │   ├── types.zig      # Request, Response, Method, StatusCode, Headers
 │   ├── router.zig     # Radix-trie router with global + per-route middleware, groups, params & wildcards
 │   ├── parser.zig     # Zero-copy HTTP/1.1 request parser
-│   ├── server.zig     # Epoll event loop, connection management
+│   ├── server.zig     # Epoll event loop, connection management, graceful shutdown
 │   ├── pool.zig       # Connection pool — pre-allocated ConnState objects
 │   ├── query.zig      # Query string parser with URL decoding and typed access
 │   ├── json.zig       # Comptime JSON serializer (Json, JsonObject, JsonArray)
@@ -508,6 +533,7 @@ examples/
 - **Query parsing** — structured Query type with getInt/getBool/getAll/getDecode, zero-copy raw access or URL-decoded
 - **Cookie support** — zero-copy request cookie parsing, Set-Cookie builder with Max-Age/Path/Domain/Secure/HttpOnly/SameSite
 - **Keep-alive timeout** — timerfd-based idle connection sweep, configurable timeout per server
+- **Graceful shutdown** — self-pipe trick for signal delivery, atomic flag across workers, connection draining with configurable timeout
 
 ## Building
 

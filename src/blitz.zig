@@ -105,6 +105,9 @@ pub const SameSite = cookie_mod.SameSite;
 pub const buildSetCookie = cookie_mod.buildSetCookie;
 pub const buildDeleteCookie = cookie_mod.buildDeleteCookie;
 
+// Graceful shutdown
+pub const isShuttingDown = server_mod.isShuttingDown;
+
 // Utilities
 pub const writeUsize = types.writeUsize;
 pub const writeI64 = types.writeI64;
