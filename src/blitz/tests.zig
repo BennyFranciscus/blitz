@@ -5,6 +5,8 @@ const mem = std.mem;
 const types = @import("types.zig");
 const router_mod = @import("router.zig");
 const parser_mod = @import("parser.zig");
+const json_mod = @import("json.zig");
+const errors_mod = @import("errors.zig");
 
 const Method = types.Method;
 const StatusCode = types.StatusCode;
@@ -544,4 +546,203 @@ test "writeI64" {
     try testing.expectEqualStrings("0", types.writeI64(&buf, 0));
     try testing.expectEqualStrings("42", types.writeI64(&buf, 42));
     try testing.expectEqualStrings("-7", types.writeI64(&buf, -7));
+}
+
+// ════════════════════════════════════════════════════════════════════
+// JSON builder tests
+// ════════════════════════════════════════════════════════════════════
+
+const Json = json_mod.Json;
+const JsonObject = json_mod.JsonObject;
+const JsonArray = json_mod.JsonArray;
+
+test "Json.stringify string" {
+    var buf: [256]u8 = undefined;
+    const result = Json.stringify(&buf, "hello").?;
+    try testing.expectEqualStrings("\"hello\"", result);
+}
+
+test "Json.stringify string escaping" {
+    var buf: [256]u8 = undefined;
+    const result = Json.stringify(&buf, "he said \"hi\"\nnewline").?;
+    try testing.expectEqualStrings("\"he said \\\"hi\\\"\\nnewline\"", result);
+}
+
+test "Json.stringify integers" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("42", Json.stringify(&buf, @as(i64, 42)).?);
+    try testing.expectEqualStrings("0", Json.stringify(&buf, @as(i64, 0)).?);
+    try testing.expectEqualStrings("-7", Json.stringify(&buf, @as(i64, -7)).?);
+}
+
+test "Json.stringify bool" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("true", Json.stringify(&buf, true).?);
+    try testing.expectEqualStrings("false", Json.stringify(&buf, false).?);
+}
+
+test "Json.stringify optional" {
+    var buf: [256]u8 = undefined;
+    const some: ?i64 = 5;
+    const none: ?i64 = null;
+    try testing.expectEqualStrings("5", Json.stringify(&buf, some).?);
+    try testing.expectEqualStrings("null", Json.stringify(&buf, none).?);
+}
+
+test "Json.stringify struct" {
+    var buf: [512]u8 = undefined;
+    const val = .{ .name = "Alice", .age = @as(i64, 30), .active = true };
+    const result = Json.stringify(&buf, val).?;
+    try testing.expectEqualStrings("{\"name\":\"Alice\",\"age\":30,\"active\":true}", result);
+}
+
+test "Json.stringify struct with optional null skipped" {
+    var buf: [512]u8 = undefined;
+    const T = struct {
+        name: []const u8,
+        email: ?[]const u8,
+    };
+    const val = T{ .name = "Bob", .email = null };
+    const result = Json.stringify(&buf, val).?;
+    try testing.expectEqualStrings("{\"name\":\"Bob\"}", result);
+}
+
+test "Json.stringify struct with optional present" {
+    var buf: [512]u8 = undefined;
+    const T = struct {
+        name: []const u8,
+        email: ?[]const u8,
+    };
+    const val = T{ .name = "Bob", .email = "bob@example.com" };
+    const result = Json.stringify(&buf, val).?;
+    try testing.expectEqualStrings("{\"name\":\"Bob\",\"email\":\"bob@example.com\"}", result);
+}
+
+test "Json.stringify slice of ints" {
+    var buf: [256]u8 = undefined;
+    const items = [_]i64{ 1, 2, 3 };
+    const result = Json.stringify(&buf, @as([]const i64, &items)).?;
+    try testing.expectEqualStrings("[1,2,3]", result);
+}
+
+test "Json.stringify enum" {
+    var buf: [256]u8 = undefined;
+    const Color = enum { red, green, blue };
+    try testing.expectEqualStrings("\"green\"", Json.stringify(&buf, Color.green).?);
+}
+
+test "Json.stringify overflow returns null" {
+    var buf: [5]u8 = undefined;
+    // "hello" needs 7 bytes with quotes
+    try testing.expect(Json.stringify(&buf, "hello") == null);
+}
+
+test "JsonObject basic" {
+    var buf: [256]u8 = undefined;
+    var obj = JsonObject.init(&buf);
+    obj.field("name", "Alice");
+    obj.field("age", @as(i64, 30));
+    obj.field("active", true);
+    const result = obj.finish().?;
+    try testing.expectEqualStrings("{\"name\":\"Alice\",\"age\":30,\"active\":true}", result);
+}
+
+test "JsonObject with rawField" {
+    var buf: [256]u8 = undefined;
+    var obj = JsonObject.init(&buf);
+    obj.field("name", "Test");
+    obj.rawField("data", "[1,2,3]");
+    const result = obj.finish().?;
+    try testing.expectEqualStrings("{\"name\":\"Test\",\"data\":[1,2,3]}", result);
+}
+
+test "JsonArray basic" {
+    var buf: [256]u8 = undefined;
+    var arr = JsonArray.init(&buf);
+    arr.push(@as(i64, 1));
+    arr.push(@as(i64, 2));
+    arr.push(@as(i64, 3));
+    const result = arr.finish().?;
+    try testing.expectEqualStrings("[1,2,3]", result);
+}
+
+test "JsonArray mixed types" {
+    var buf: [256]u8 = undefined;
+    var arr = JsonArray.init(&buf);
+    arr.push("hello");
+    arr.push(@as(i64, 42));
+    arr.push(true);
+    const result = arr.finish().?;
+    try testing.expectEqualStrings("[\"hello\",42,true]", result);
+}
+
+test "JsonArray with pushRaw" {
+    var buf: [256]u8 = undefined;
+    var arr = JsonArray.init(&buf);
+    arr.push("first");
+    arr.pushRaw("{\"nested\":true}");
+    const result = arr.finish().?;
+    try testing.expectEqualStrings("[\"first\",{\"nested\":true}]", result);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Error handling tests
+// ════════════════════════════════════════════════════════════════════
+
+test "sendError with custom message produces raw response" {
+    var res = Response{};
+    errors_mod.sendError(&res, .bad_request, "Missing field");
+    // Custom messages use rawResponse (full HTTP response)
+    const raw = res.raw.?;
+    try testing.expect(mem.indexOf(u8, raw, "400 Bad Request") != null);
+    try testing.expect(mem.indexOf(u8, raw, "application/json") != null);
+    try testing.expect(mem.indexOf(u8, raw, "\"status\":400") != null);
+    try testing.expect(mem.indexOf(u8, raw, "\"message\":\"Missing field\"") != null);
+}
+
+test "sendError with empty message uses pre-computed response" {
+    var res = Response{};
+    errors_mod.sendError(&res, .not_found, "");
+    try testing.expectEqual(StatusCode.not_found, res.status);
+    try testing.expectEqualStrings("application/json", res.headers.get("Content-Type").?);
+    const body = res.body.?;
+    try testing.expect(mem.indexOf(u8, body, "\"status\":404") != null);
+}
+
+test "badRequest convenience" {
+    var res = Response{};
+    errors_mod.badRequest(&res, "Bad input");
+    const raw = res.raw.?;
+    try testing.expect(mem.indexOf(u8, raw, "\"status\":400") != null);
+    try testing.expect(mem.indexOf(u8, raw, "\"message\":\"Bad input\"") != null);
+}
+
+test "notFound convenience" {
+    var res = Response{};
+    errors_mod.notFound(&res, "No such thing");
+    const raw = res.raw.?;
+    try testing.expect(mem.indexOf(u8, raw, "\"status\":404") != null);
+}
+
+test "internalError convenience" {
+    var res = Response{};
+    errors_mod.internalError(&res, "Something broke");
+    const raw = res.raw.?;
+    try testing.expect(mem.indexOf(u8, raw, "\"status\":500") != null);
+    try testing.expect(mem.indexOf(u8, raw, "\"message\":\"Something broke\"") != null);
+}
+
+test "jsonNotFoundHandler" {
+    var req = Request{
+        .method = .GET,
+        .path = "/nope",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    var res = Response{};
+    errors_mod.jsonNotFoundHandler(&req, &res);
+    try testing.expectEqual(StatusCode.not_found, res.status);
+    try testing.expectEqualStrings("application/json", res.headers.get("Content-Type").?);
 }

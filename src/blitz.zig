@@ -34,6 +34,8 @@ pub const types = @import("blitz/types.zig");
 pub const router_mod = @import("blitz/router.zig");
 pub const parser_mod = @import("blitz/parser.zig");
 pub const server_mod = @import("blitz/server.zig");
+pub const json_mod = @import("blitz/json.zig");
+pub const errors_mod = @import("blitz/errors.zig");
 
 // Re-export main types for convenience
 pub const Request = types.Request;
@@ -47,6 +49,22 @@ pub const Router = router_mod.Router;
 pub const Group = router_mod.Group;
 pub const Server = server_mod.Server;
 pub const Config = server_mod.Config;
+
+// JSON
+pub const Json = json_mod.Json;
+pub const JsonObject = json_mod.JsonObject;
+pub const JsonArray = json_mod.JsonArray;
+
+// Error handling
+pub const sendError = errors_mod.sendError;
+pub const badRequest = errors_mod.badRequest;
+pub const unauthorized = errors_mod.unauthorized;
+pub const forbidden = errors_mod.forbidden;
+pub const notFound = errors_mod.notFound;
+pub const methodNotAllowed = errors_mod.methodNotAllowed;
+pub const internalError = errors_mod.internalError;
+pub const jsonNotFoundHandler = errors_mod.jsonNotFoundHandler;
+pub const jsonMethodNotAllowedHandler = errors_mod.jsonMethodNotAllowedHandler;
 
 // Utilities
 pub const writeUsize = types.writeUsize;

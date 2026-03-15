@@ -11,6 +11,8 @@ A blazing-fast HTTP/1.1 micro web framework for Zig.
 - **Pipeline batching** — handle multiple HTTP requests per read
 - **Middleware chain** — composable middleware with short-circuit support
 - **Route groups** — organize routes under shared prefixes
+- **JSON builder** — comptime-powered zero-allocation JSON serialization
+- **Structured errors** — consistent JSON error responses out of the box
 - **Clean API** — define routes and handlers, blitz handles the rest
 
 ## Quick Start
@@ -60,8 +62,8 @@ router.get("/users/:id", getUserHandler);
 // Wildcards
 router.get("/static/*filepath", staticHandler);
 
-// Custom 404
-router.notFound(my404Handler);
+// Custom 404 (or use the built-in JSON one)
+router.notFound(blitz.jsonNotFoundHandler);
 ```
 
 ### Middleware
@@ -77,7 +79,7 @@ fn cors(_: *blitz.Request, res: *blitz.Response) bool {
 
 fn auth(req: *blitz.Request, res: *blitz.Response) bool {
     if (req.headers.get("Authorization") == null) {
-        _ = res.setStatus(.unauthorized).json("{\"error\":\"unauthorized\"}");
+        blitz.unauthorized(res, "Token required");
         return false; // stop here — don't call the handler
     }
     return true;
@@ -131,7 +133,7 @@ fn handler(_: *blitz.Request, res: *blitz.Response) void {
     // Plain text
     _ = res.text("hello");
 
-    // JSON
+    // JSON (raw string)
     _ = res.json("{\"ok\":true}");
 
     // HTML
@@ -146,6 +148,73 @@ fn handler(_: *blitz.Request, res: *blitz.Response) void {
     // Pre-computed raw response (maximum performance)
     _ = res.rawResponse("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
 }
+```
+
+### JSON Builder
+
+Zero-allocation JSON serialization powered by comptime. Writes directly into caller-provided buffers.
+
+```zig
+// Serialize a struct (comptime field introspection)
+var buf: [512]u8 = undefined;
+const json_str = blitz.Json.stringify(&buf, .{
+    .name = "Alice",
+    .age = @as(i64, 30),
+    .active = true,
+}) orelse return error.BufferOverflow;
+_ = res.json(json_str);
+
+// Build JSON objects manually
+var obj_buf: [256]u8 = undefined;
+var obj = blitz.JsonObject.init(&obj_buf);
+obj.field("id", @as(i64, 1));
+obj.field("name", "Alice");
+obj.field("tags", @as([]const []const u8, &.{ "admin", "user" }));
+const body = obj.finish() orelse "{}";
+_ = res.json(body);
+
+// Build JSON arrays
+var arr_buf: [256]u8 = undefined;
+var arr = blitz.JsonArray.init(&arr_buf);
+arr.push(@as(i64, 1));
+arr.push(@as(i64, 2));
+arr.push(@as(i64, 3));
+const list = arr.finish() orelse "[]";
+
+// Supports: structs, slices, ints, floats, bools, strings,
+//           optionals (null fields skipped), enums (as strings)
+```
+
+### Error Handling
+
+Structured JSON error responses with convenience helpers.
+
+```zig
+// In a handler:
+fn getUser(req: *blitz.Request, res: *blitz.Response) void {
+    const id = req.params.get("id") orelse {
+        blitz.badRequest(res, "Missing user ID");
+        return;
+    };
+    // ... look up user ...
+    blitz.notFound(res, "User not found");
+}
+
+// Available error helpers:
+blitz.badRequest(res, "message");      // 400
+blitz.unauthorized(res, "message");    // 401
+blitz.forbidden(res, "message");       // 403
+blitz.notFound(res, "message");        // 404
+blitz.methodNotAllowed(res, "msg");    // 405
+blitz.internalError(res, "message");   // 500
+
+// Generic:
+blitz.sendError(res, .bad_request, "Custom message");
+
+// Response format: {"error":{"status":400,"message":"Missing user ID"}}
+
+// Built-in JSON 404 handler for the router:
+router.notFound(blitz.jsonNotFoundHandler);
 ```
 
 ### Server
@@ -164,25 +233,28 @@ try server.listen();
 src/
 ├── blitz.zig          # Module root — re-exports everything
 ├── blitz/
-│   ├── types.zig      # Request, Response, Method, StatusCode, Headers, MiddlewareFn
-│   ├── router.zig     # Radix-trie router with middleware, groups, path params & wildcards
+│   ├── types.zig      # Request, Response, Method, StatusCode, Headers
+│   ├── router.zig     # Radix-trie router with middleware, groups, params & wildcards
 │   ├── parser.zig     # Zero-copy HTTP/1.1 request parser
 │   ├── server.zig     # Epoll event loop, connection management
+│   ├── json.zig       # Comptime JSON serializer (Json, JsonObject, JsonArray)
+│   ├── errors.zig     # Structured error responses (sendError, badRequest, etc.)
 │   └── tests.zig      # Unit tests for all modules
 ├── main.zig           # HttpArena benchmark entry point
 examples/
-└── hello.zig          # Example app with middleware + route groups
+└── hello.zig          # Example app with all features
 ```
 
 ## Design Decisions
 
-- **No allocations in hot path** — responses are written to a pre-allocated ArrayList
+- **No allocations in hot path** — responses written to pre-allocated buffers
 - **Edge-triggered epoll** — fewer syscalls than level-triggered
 - **SO_REUSEPORT** — kernel distributes connections across worker threads
-- **Pre-computed responses** — for benchmarks, build the full HTTP response at startup
+- **Pre-computed responses** — full HTTP response built at startup for static data
 - **Radix trie over hash map** — better cache locality for path matching
 - **Linear middleware** — `fn(*Req, *Res) bool` is simpler and faster than callback chains
 - **Route groups** — prefix concatenation at init time, zero runtime overhead
+- **Comptime JSON** — Zig's comptime introspects struct fields at compile time, no reflection cost at runtime
 
 ## Building
 
