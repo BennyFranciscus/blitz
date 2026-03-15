@@ -8,7 +8,7 @@ A blazing-fast HTTP/1.1 micro web framework for Zig.
 - **Zero-copy HTTP parsing** — request data stays in the read buffer
 - **Dual backend** — epoll (default) or io_uring for maximum throughput
 - **Epoll + SO_REUSEPORT** — one accept socket per core, no lock contention
-- **io_uring** — multishot accept, provided buffer ring, async send (select with `BLITZ_URING=1`)
+- **io_uring** — multishot accept, kernel-managed buffer ring, async send (select with `BLITZ_URING=1`)
 - **Pre-computed responses** — bypass serialization for static content
 - **Pipeline batching** — handle multiple HTTP requests per read
 - **Middleware chain** — global and per-route middleware with short-circuit support
@@ -610,7 +610,7 @@ BLITZ_URING=1 ./blitz
 
 **io_uring features used:**
 - **Multishot accept** — single SQE continuously accepts connections
-- **Provided buffer ring** — 4096 pre-allocated recv buffers, kernel selects from the pool
+- **Kernel-managed buffer ring** (`io_uring_buf_ring`) — 4096 pre-allocated recv buffers, zero-SQE buffer recycling via shared memory
 - **Async send** — non-blocking response writes with partial-send resubmission
 - **SINGLE_ISSUER + DEFER_TASKRUN** — reduced kernel overhead (auto-fallback for older kernels)
 
@@ -626,7 +626,7 @@ src/
 │   ├── router.zig     # Radix-trie router with global + per-route middleware, groups, params & wildcards
 │   ├── parser.zig     # Zero-copy HTTP/1.1 request parser
 │   ├── server.zig     # Epoll event loop, connection management, graceful shutdown
-│   ├── uring.zig      # io_uring event loop — multishot accept, provided buffers, async send
+│   ├── uring.zig      # io_uring event loop — multishot accept, buffer ring, async send
 │   ├── pool.zig       # Connection pool — pre-allocated ConnState objects (epoll backend)
 │   ├── query.zig      # Query string parser with URL decoding and typed access
 │   ├── json.zig       # Comptime JSON serializer (Json, JsonObject, JsonArray)
@@ -658,7 +658,7 @@ examples/
 - **Keep-alive timeout** — timerfd-based idle connection sweep, configurable timeout per server
 - **Response compression** — automatic gzip/deflate using `std.compress.gzip`, fast level for low latency, skips tiny bodies and incompressible types
 - **Graceful shutdown** — self-pipe trick for signal delivery, atomic flag across workers, connection draining with configurable timeout
-- **io_uring backend** — multishot accept, provided buffer ring for zero-alloc recv, async send, SINGLE_ISSUER + DEFER_TASKRUN for reduced syscall overhead
+- **io_uring backend** — multishot accept, kernel-managed buffer ring (`io_uring_buf_ring`) for zero-SQE recv buffer recycling, async send, SINGLE_ISSUER + DEFER_TASKRUN
 
 ## Building
 
