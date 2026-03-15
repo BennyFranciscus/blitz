@@ -5,15 +5,18 @@ const Method = types.Method;
 const Request = types.Request;
 const Response = types.Response;
 const HandlerFn = types.HandlerFn;
+const MiddlewareFn = types.MiddlewareFn;
 
 // ── Radix-trie Router ──────────────────────────────────────────────
 // Fast path matching with support for:
 //   - Static paths: /users, /api/v1/health
 //   - Path parameters: /users/:id, /posts/:id/comments
 //   - Wildcard: /static/*filepath
+//   - Middleware: global and per-route middleware chains
 
 const MAX_CHILDREN = 64;
 const MAX_METHODS = 7; // GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS
+const MAX_MIDDLEWARE = 16;
 
 const Node = struct {
     // Path segment for this node
@@ -46,11 +49,23 @@ pub const Router = struct {
     root: *Node,
     alloc: std.mem.Allocator,
     not_found_handler: ?HandlerFn = null,
+    // Global middleware chain
+    middleware: [MAX_MIDDLEWARE]MiddlewareFn = undefined,
+    middleware_count: usize = 0,
 
     pub fn init(alloc: std.mem.Allocator) Router {
         const root = alloc.create(Node) catch @panic("OOM");
         root.* = .{};
         return .{ .root = root, .alloc = alloc };
+    }
+
+    /// Add global middleware (runs on every request before the handler).
+    /// Returns true to continue, false to short-circuit.
+    pub fn use(self: *Router, mw: MiddlewareFn) void {
+        if (self.middleware_count < MAX_MIDDLEWARE) {
+            self.middleware[self.middleware_count] = mw;
+            self.middleware_count += 1;
+        }
     }
 
     /// Register a handler for a method + path pattern
@@ -126,6 +141,24 @@ pub const Router = struct {
         self.route(.DELETE, pattern, handler);
     }
 
+    pub fn patch(self: *Router, pattern: []const u8, handler: HandlerFn) void {
+        self.route(.PATCH, pattern, handler);
+    }
+
+    pub fn head(self: *Router, pattern: []const u8, handler: HandlerFn) void {
+        self.route(.HEAD, pattern, handler);
+    }
+
+    pub fn options(self: *Router, pattern: []const u8, handler: HandlerFn) void {
+        self.route(.OPTIONS, pattern, handler);
+    }
+
+    /// Create a route group with a shared prefix.
+    /// Returns a Group that registers routes under the prefix.
+    pub fn group(self: *Router, prefix: []const u8) Group {
+        return .{ .router = self, .prefix = prefix };
+    }
+
     /// Match a request path and return the handler + fill params
     pub fn match(self: *Router, method: Method, path: []const u8, params: *Request.Params) ?HandlerFn {
         var p = path;
@@ -174,8 +207,13 @@ pub const Router = struct {
         return null;
     }
 
-    /// Handle a request — finds route and calls handler
+    /// Handle a request — runs middleware chain, then finds route and calls handler
     pub fn handle(self: *Router, req: *Request, res: *Response) void {
+        // Run global middleware chain
+        for (self.middleware[0..self.middleware_count]) |mw| {
+            if (!mw(req, res)) return; // Middleware short-circuited
+        }
+
         var params = Request.Params{};
         if (self.match(req.method, req.path, &params)) |handler| {
             req.params = params;
@@ -190,5 +228,57 @@ pub const Router = struct {
     /// Set a custom 404 handler
     pub fn notFound(self: *Router, handler: HandlerFn) void {
         self.not_found_handler = handler;
+    }
+};
+
+// ── Route Group ─────────────────────────────────────────────────────
+// Groups register routes under a shared prefix.
+// Usage: var api = router.group("/api/v1");
+//        api.get("/users", listUsers);   // matches /api/v1/users
+//        api.post("/users", createUser);
+
+pub const Group = struct {
+    router: *Router,
+    prefix: []const u8,
+
+    fn buildPath(self: Group, pattern: []const u8) ?[]const u8 {
+        const prefix = mem.trimRight(u8, self.prefix, "/");
+        const pat = pattern;
+        const len = prefix.len + pat.len;
+        const full = self.router.alloc.alloc(u8, len) catch return null;
+        @memcpy(full[0..prefix.len], prefix);
+        @memcpy(full[prefix.len..len], pat);
+        return full;
+    }
+
+    pub fn route(self: Group, method: Method, pattern: []const u8, handler: HandlerFn) void {
+        const full = self.buildPath(pattern) orelse return;
+        self.router.route(method, full, handler);
+    }
+
+    pub fn get(self: Group, pattern: []const u8, handler: HandlerFn) void {
+        self.route(.GET, pattern, handler);
+    }
+
+    pub fn post(self: Group, pattern: []const u8, handler: HandlerFn) void {
+        self.route(.POST, pattern, handler);
+    }
+
+    pub fn put(self: Group, pattern: []const u8, handler: HandlerFn) void {
+        self.route(.PUT, pattern, handler);
+    }
+
+    pub fn delete(self: Group, pattern: []const u8, handler: HandlerFn) void {
+        self.route(.DELETE, pattern, handler);
+    }
+
+    pub fn patch(self: Group, pattern: []const u8, handler: HandlerFn) void {
+        self.route(.PATCH, pattern, handler);
+    }
+
+    /// Nest a sub-group under this group's prefix
+    pub fn group(self: Group, prefix: []const u8) Group {
+        const full = self.buildPath(prefix) orelse return .{ .router = self.router, .prefix = self.prefix };
+        return .{ .router = self.router, .prefix = full };
     }
 };

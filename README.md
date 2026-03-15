@@ -9,13 +9,15 @@ A blazing-fast HTTP/1.1 micro web framework for Zig.
 - **Epoll + SO_REUSEPORT** — one accept socket per core, no lock contention
 - **Pre-computed responses** — bypass serialization for static content
 - **Pipeline batching** — handle multiple HTTP requests per read
+- **Middleware chain** — composable middleware with short-circuit support
+- **Route groups** — organize routes under shared prefixes
 - **Clean API** — define routes and handlers, blitz handles the rest
 
 ## Quick Start
 
 ```zig
 const std = @import("std");
-const blitz = @import("blitz.zig");
+const blitz = @import("blitz");
 
 fn hello(_: *blitz.Request, res: *blitz.Response) void {
     _ = res.text("Hello, World!");
@@ -47,6 +49,9 @@ router.get("/path", handler);
 router.post("/path", handler);
 router.put("/path", handler);
 router.delete("/path", handler);
+router.patch("/path", handler);
+router.head("/path", handler);
+router.options("/path", handler);
 router.route(.PATCH, "/path", handler);
 
 // Path parameters
@@ -57,6 +62,45 @@ router.get("/static/*filepath", staticHandler);
 
 // Custom 404
 router.notFound(my404Handler);
+```
+
+### Middleware
+
+Middleware functions run before every handler. Return `true` to continue, `false` to short-circuit (e.g., auth failure).
+
+```zig
+// Simple middleware signature: fn(*Request, *Response) bool
+fn cors(_: *blitz.Request, res: *blitz.Response) bool {
+    res.headers.set("Access-Control-Allow-Origin", "*");
+    return true; // continue to next middleware / handler
+}
+
+fn auth(req: *blitz.Request, res: *blitz.Response) bool {
+    if (req.headers.get("Authorization") == null) {
+        _ = res.setStatus(.unauthorized).json("{\"error\":\"unauthorized\"}");
+        return false; // stop here — don't call the handler
+    }
+    return true;
+}
+
+// Register middleware (runs in order)
+router.use(cors);
+router.use(auth);
+```
+
+### Route Groups
+
+Groups share a URL prefix — great for versioned APIs.
+
+```zig
+const api = router.group("/api/v1");
+api.get("/users", listUsers);       // matches /api/v1/users
+api.get("/users/:id", getUser);     // matches /api/v1/users/:id
+api.post("/users", createUser);     // matches /api/v1/users
+
+// Nested groups
+const admin = api.group("/admin");
+admin.get("/stats", adminStats);    // matches /api/v1/admin/stats
 ```
 
 ### Request
@@ -120,13 +164,14 @@ try server.listen();
 src/
 ├── blitz.zig          # Module root — re-exports everything
 ├── blitz/
-│   ├── types.zig      # Request, Response, Method, StatusCode, Headers
-│   ├── router.zig     # Radix-trie router with path params & wildcards
+│   ├── types.zig      # Request, Response, Method, StatusCode, Headers, MiddlewareFn
+│   ├── router.zig     # Radix-trie router with middleware, groups, path params & wildcards
 │   ├── parser.zig     # Zero-copy HTTP/1.1 request parser
-│   └── server.zig     # Epoll event loop, connection management
+│   ├── server.zig     # Epoll event loop, connection management
+│   └── tests.zig      # Unit tests for all modules
 ├── main.zig           # HttpArena benchmark entry point
 examples/
-└── hello.zig          # Simple example app
+└── hello.zig          # Example app with middleware + route groups
 ```
 
 ## Design Decisions
@@ -136,11 +181,19 @@ examples/
 - **SO_REUSEPORT** — kernel distributes connections across worker threads
 - **Pre-computed responses** — for benchmarks, build the full HTTP response at startup
 - **Radix trie over hash map** — better cache locality for path matching
+- **Linear middleware** — `fn(*Req, *Res) bool` is simpler and faster than callback chains
+- **Route groups** — prefix concatenation at init time, zero runtime overhead
 
 ## Building
 
 ```bash
 zig build -Doptimize=ReleaseFast
+```
+
+## Testing
+
+```bash
+zig build test
 ```
 
 ## Running

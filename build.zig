@@ -11,6 +11,20 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Example app (separate step — not built by default)
+    const example = b.addExecutable(.{
+        .name = "hello",
+        .root_source_file = b.path("examples/hello.zig"),
+        .target = target,
+        .optimize = optimize,
+        .single_threaded = false,
+    });
+    example.root_module.addImport("blitz", blitz_mod);
+    example.linkLibC();
+    const install_example = b.addInstallArtifact(example, .{});
+    const example_step = b.step("example", "Build the example app");
+    example_step.dependOn(&install_example.step);
+
     // HttpArena benchmark server
     const exe = b.addExecutable(.{
         .name = "blitz",

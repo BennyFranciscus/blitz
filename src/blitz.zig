@@ -42,7 +42,9 @@ pub const Method = types.Method;
 pub const StatusCode = types.StatusCode;
 pub const Headers = types.Headers;
 pub const HandlerFn = types.HandlerFn;
+pub const MiddlewareFn = types.MiddlewareFn;
 pub const Router = router_mod.Router;
+pub const Group = router_mod.Group;
 pub const Server = server_mod.Server;
 pub const Config = server_mod.Config;
 
@@ -53,3 +55,8 @@ pub const asciiEqlIgnoreCase = types.asciiEqlIgnoreCase;
 
 // Parser
 pub const parse = parser_mod.parse;
+
+// Tests (pulled in by `zig build test`)
+test {
+    _ = @import("blitz/tests.zig");
+}

@@ -239,8 +239,9 @@ pub const Response = struct {
 pub const HandlerFn = *const fn (*Request, *Response) void;
 
 // ── Middleware type ──────────────────────────────────────────────────
-pub const MiddlewareFn = *const fn (*Request, *Response, NextFn) void;
-pub const NextFn = *const fn (*Request, *Response) void;
+// Middleware returns true to continue to next middleware/handler,
+// false to short-circuit (response already set, e.g. auth failure).
+pub const MiddlewareFn = *const fn (*Request, *Response) bool;
 
 // ── Utilities ───────────────────────────────────────────────────────
 pub fn asciiEqlIgnoreCase(a: []const u8, b: []const u8) bool {
