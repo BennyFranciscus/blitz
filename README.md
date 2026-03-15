@@ -21,6 +21,7 @@ A blazing-fast HTTP/1.1 micro web framework for Zig.
 - **Cookie support** — parse request cookies and set response cookies with full RFC 6265 options
 - **Redirect helpers** — `redirect`, `redirectTemp`, `redirectPerm` for clean navigation
 - **Response compression** — automatic gzip/deflate compression for text responses (configurable)
+- **Request logging** — structured text or JSON logging with latency tracking, level filtering, and slow request detection
 - **Graceful shutdown** — handles SIGTERM/SIGINT, drains in-flight connections, configurable timeout
 - **Keep-alive timeout** — automatic idle connection cleanup via timerfd
 - **Structured errors** — consistent JSON error responses out of the box
@@ -474,6 +475,49 @@ var server = blitz.Server.init(&router, .{
 });
 try server.listen(); // Blocks until SIGTERM/SIGINT
 ```
+
+### Request Logging
+
+Built-in structured request logging with zero allocations — writes directly to stderr.
+
+```zig
+var server = blitz.Server.init(&router, .{
+    .port = 8080,
+    .logging = .{
+        .enabled = true,
+        .format = .text,          // .text or .json
+        .min_level = .info,       // .debug, .info, .warn, .err, .off
+        .slow_threshold_ms = 500, // warn on slow requests (0 = disabled)
+    },
+});
+```
+
+**Text format** (human-readable):
+```
+INFO  GET /api/users?page=1 200 1.2ms 256B
+WARN  POST /api/login 401 0.3ms 45B
+ERROR GET /crash 500 15.7ms 128B
+```
+
+**JSON format** (machine-parseable):
+```json
+{"level":"INFO","method":"GET","path":"/api/users","query":"page=1","status":200,"latency_us":1200,"size":256}
+```
+
+**Log levels** are auto-determined from response status:
+- `5xx` → `ERROR`
+- `4xx` → `WARN`
+- `2xx`/`3xx` → `INFO`
+
+**Slow request detection**: Set `slow_threshold_ms` to log requests that exceed the threshold, even if their status-based level is below `min_level`. Useful for catching performance issues.
+
+**General-purpose logging** for framework events:
+```zig
+blitz.logMsg(config, .info, "server started on port 8080");
+blitz.logMsg(config, .warn, "connection pool exhausted");
+```
+
+Logging is **disabled by default** — zero overhead when not configured. When enabled, all formatting uses stack buffers (no heap allocations).
 
 ### Graceful Shutdown
 

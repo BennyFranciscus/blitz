@@ -180,6 +180,14 @@ pub fn main() !void {
     // JSON 404 handler
     router.notFound(blitz.jsonNotFoundHandler);
 
-    var server = blitz.Server.init(&router, .{ .port = 8080 });
+    var server = blitz.Server.init(&router, .{
+        .port = 8080,
+        .logging = .{
+            .enabled = true,
+            .format = .text,
+            .min_level = .info,
+            .slow_threshold_ms = 500, // warn on requests >500ms
+        },
+    });
     try server.listen();
 }

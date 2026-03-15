@@ -11,6 +11,7 @@ const pool_mod = @import("pool.zig");
 const ConnPool = pool_mod.ConnPool;
 const ConnState = pool_mod.ConnState;
 const compress_mod = @import("compress.zig");
+const log_mod = @import("log.zig");
 const Request = types.Request;
 const Response = types.Response;
 
@@ -34,6 +35,7 @@ pub const Config = struct {
     keep_alive_timeout: u32 = 60, // seconds (0 = disable)
     shutdown_timeout: u32 = 30, // seconds to drain connections before force-close (0 = immediate)
     compression: bool = true, // enable gzip/deflate response compression
+    logging: log_mod.LogConfig = .{}, // request logging (disabled by default)
 };
 
 // ── Shared shutdown state (atomic, shared across worker threads) ─────
@@ -136,6 +138,7 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
     const ka_timeout: i64 = @intCast(config.keep_alive_timeout);
     const drain_timeout: i64 = @intCast(config.shutdown_timeout);
     const compression_enabled = config.compression;
+    const log_config = config.logging;
 
     // Initialize connection pool for this worker
     var pool = ConnPool.init(alloc, POOL_SIZE) catch return;
@@ -298,6 +301,7 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
 
                 // Parse and handle pipelined requests
                 var compress_buf: [COMPRESS_BUF_SIZE]u8 = undefined;
+                const logging = log_config.enabled;
                 var off: usize = 0;
                 while (off < st.read_len) {
                     const result = parser.parse(st.read_buf[off..st.read_len]) orelse break;
@@ -309,11 +313,19 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                         res.headers.set("Connection", "close");
                     }
 
+                    // Capture start time for request logging
+                    const req_start = if (logging) log_mod.now() else 0;
+
                     router.handle(&req, &res);
 
                     // Apply response compression if enabled
                     if (compression_enabled) {
                         _ = compress_mod.compressResponse(&compress_buf, &req, &res);
+                    }
+
+                    // Log completed request
+                    if (logging) {
+                        log_mod.logRequest(log_config, &req, &res, req_start);
                     }
 
                     res.writeTo(&st.write_list);
