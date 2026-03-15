@@ -6,7 +6,9 @@ A blazing-fast HTTP/1.1 micro web framework for Zig.
 
 - **Radix-trie router** with path parameters (`:id`) and wildcards (`*filepath`)
 - **Zero-copy HTTP parsing** — request data stays in the read buffer
+- **Dual backend** — epoll (default) or io_uring for maximum throughput
 - **Epoll + SO_REUSEPORT** — one accept socket per core, no lock contention
+- **io_uring** — multishot accept, provided buffer ring, async send (select with `BLITZ_URING=1`)
 - **Pre-computed responses** — bypass serialization for static content
 - **Pipeline batching** — handle multiple HTTP requests per read
 - **Middleware chain** — global and per-route middleware with short-circuit support
@@ -542,6 +544,34 @@ fn handler(req: *blitz.Request, res: *blitz.Response) void {
 }
 ```
 
+### io_uring Backend (experimental)
+
+For maximum throughput on Linux 5.19+, blitz includes an io_uring backend:
+
+```zig
+// In your main.zig:
+var uring_server = blitz.UringServer.init(&router, .{
+    .port = 8080,
+    .threads = null,       // auto-detect
+    .compression = false,  // for benchmarks
+});
+try uring_server.listen();
+```
+
+Or use the environment variable with the built-in HttpArena entry:
+
+```bash
+BLITZ_URING=1 ./blitz
+```
+
+**io_uring features used:**
+- **Multishot accept** — single SQE continuously accepts connections
+- **Provided buffer ring** — 4096 pre-allocated recv buffers, kernel selects from the pool
+- **Async send** — non-blocking response writes with partial-send resubmission
+- **SINGLE_ISSUER + DEFER_TASKRUN** — reduced kernel overhead (auto-fallback for older kernels)
+
+**Requirements:** Linux 5.19+ (6.1+ for DEFER_TASKRUN). Docker containers need `--privileged` or appropriate seccomp profile.
+
 ## Architecture
 
 ```
@@ -552,7 +582,8 @@ src/
 │   ├── router.zig     # Radix-trie router with global + per-route middleware, groups, params & wildcards
 │   ├── parser.zig     # Zero-copy HTTP/1.1 request parser
 │   ├── server.zig     # Epoll event loop, connection management, graceful shutdown
-│   ├── pool.zig       # Connection pool — pre-allocated ConnState objects
+│   ├── uring.zig      # io_uring event loop — multishot accept, provided buffers, async send
+│   ├── pool.zig       # Connection pool — pre-allocated ConnState objects (epoll backend)
 │   ├── query.zig      # Query string parser with URL decoding and typed access
 │   ├── json.zig       # Comptime JSON serializer (Json, JsonObject, JsonArray)
 │   ├── body.zig       # Request body parsing (URL-encoded forms, multipart/form-data)
@@ -583,6 +614,7 @@ examples/
 - **Keep-alive timeout** — timerfd-based idle connection sweep, configurable timeout per server
 - **Response compression** — automatic gzip/deflate using `std.compress.gzip`, fast level for low latency, skips tiny bodies and incompressible types
 - **Graceful shutdown** — self-pipe trick for signal delivery, atomic flag across workers, connection draining with configurable timeout
+- **io_uring backend** — multishot accept, provided buffer ring for zero-alloc recv, async send, SINGLE_ISSUER + DEFER_TASKRUN for reduced syscall overhead
 
 ## Building
 
