@@ -15,6 +15,7 @@ A blazing-fast HTTP/1.1 micro web framework for Zig.
 - **Static file serving** — serve files from disk with MIME detection, path traversal protection, and cache control
 - **Query string parsing** — structured typed query params with URL decoding
 - **Connection pooling** — pre-allocated ConnState objects, zero malloc/free per connection
+- **Request body parsing** — URL-encoded forms and multipart/form-data with typed access
 - **Structured errors** — consistent JSON error responses out of the box
 - **Clean API** — define routes and handlers, blitz handles the rest
 
@@ -268,6 +269,70 @@ var buf: [256]u8 = undefined;
 const decoded = blitz.urlDecode(&buf, "hello%20world+foo"); // "hello world foo"
 ```
 
+### Request Body Parsing
+
+Parse form bodies and multipart uploads with zero-copy efficiency.
+
+**URL-encoded forms:**
+
+```zig
+fn handleForm(req: *blitz.Request, res: *blitz.Response) void {
+    const form = req.formData(); // parses application/x-www-form-urlencoded
+
+    const name = form.get("name") orelse "anonymous";
+    const age = form.getInt("age", i64) orelse 0;
+    _ = age;
+
+    // URL-decoded values
+    var buf: [256]u8 = undefined;
+    const msg = form.getDecode("message", &buf);
+    _ = msg;
+
+    _ = res.text(name);
+}
+```
+
+**Multipart/form-data (file uploads):**
+
+```zig
+fn handleUpload(req: *blitz.Request, res: *blitz.Response) void {
+    const mp = req.multipart() orelse {
+        blitz.badRequest(res, "Expected multipart body");
+        return;
+    };
+
+    // Get a text field
+    if (mp.get("title")) |part| {
+        // part.data is the field value
+        _ = part;
+    }
+
+    // Get a file upload
+    if (mp.getFile("avatar")) |file| {
+        // file.filename  — original filename
+        // file.content_type — MIME type
+        // file.data — file contents (slice into request body)
+        _ = file;
+    }
+
+    _ = res.text("uploaded");
+}
+```
+
+**Content type detection:**
+
+```zig
+fn handler(req: *blitz.Request, res: *blitz.Response) void {
+    switch (req.contentType()) {
+        .json => { /* parse JSON body */ },
+        .form_urlencoded => { const form = req.formData(); _ = form; },
+        .multipart => { const mp = req.multipart(); _ = mp; },
+        else => { blitz.badRequest(res, "Unsupported content type"); return; },
+    }
+    _ = res.text("ok");
+}
+```
+
 ### Static File Serving
 
 Serve files from disk with automatic MIME type detection, directory traversal protection, and optional cache control.
@@ -346,9 +411,10 @@ src/
 │   ├── pool.zig       # Connection pool — pre-allocated ConnState objects
 │   ├── query.zig      # Query string parser with URL decoding and typed access
 │   ├── json.zig       # Comptime JSON serializer (Json, JsonObject, JsonArray)
+│   ├── body.zig       # Request body parsing (URL-encoded forms, multipart/form-data)
 │   ├── errors.zig     # Structured error responses (sendError, badRequest, etc.)
 │   ├── static.zig     # Static file serving (MIME detection, path security, file reading)
-│   └── tests.zig      # Unit tests for all modules (118 tests)
+│   └── tests.zig      # Unit tests for all modules (130 tests)
 ├── main.zig           # HttpArena benchmark entry point
 examples/
 └── hello.zig          # Example app with all features

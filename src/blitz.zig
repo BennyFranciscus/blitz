@@ -39,6 +39,7 @@ pub const errors_mod = @import("blitz/errors.zig");
 pub const static_mod = @import("blitz/static.zig");
 pub const query_mod = @import("blitz/query.zig");
 pub const pool_mod = @import("blitz/pool.zig");
+pub const body_mod = @import("blitz/body.zig");
 
 // Re-export main types for convenience
 pub const Request = types.Request;
@@ -80,6 +81,16 @@ pub const jsonMethodNotAllowedHandler = errors_mod.jsonMethodNotAllowedHandler;
 pub const Query = query_mod.Query;
 pub const urlDecode = query_mod.urlDecode;
 
+// Body parsing
+pub const FormData = body_mod.FormData;
+pub const parseForm = body_mod.parseForm;
+pub const ContentType = body_mod.ContentType;
+pub const detectContentType = body_mod.detectContentType;
+pub const extractBoundary = body_mod.extractBoundary;
+pub const MultipartPart = body_mod.MultipartPart;
+pub const MultipartResult = body_mod.MultipartResult;
+pub const parseMultipart = body_mod.parseMultipart;
+
 // Connection pooling
 pub const ConnPool = pool_mod.ConnPool;
 pub const ConnState = pool_mod.ConnState;
@@ -98,4 +109,5 @@ test {
     _ = @import("blitz/static.zig");
     _ = @import("blitz/query.zig");
     _ = @import("blitz/pool.zig");
+    _ = @import("blitz/body.zig");
 }

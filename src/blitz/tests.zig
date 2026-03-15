@@ -10,6 +10,7 @@ const errors_mod = @import("errors.zig");
 const static_mod = @import("static.zig");
 const query_mod = @import("query.zig");
 const pool_mod = @import("pool.zig");
+const body_mod = @import("body.zig");
 
 const Method = types.Method;
 const StatusCode = types.StatusCode;
@@ -1535,6 +1536,166 @@ test "Per-route middleware with path params" {
     router.handle(&req, &res);
     try testing.expectEqualStrings("42", res.body.?);
     try testing.expectEqualStrings("applied", res.headers.get("X-Users-MW").?);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Body parser tests
+// ════════════════════════════════════════════════════════════════════
+
+test "parseForm basic URL-encoded body" {
+    const form = body_mod.parseForm("name=Alice&age=30&city=NYC");
+    try testing.expectEqual(@as(usize, 3), form.len);
+    try testing.expectEqualStrings("Alice", form.get("name").?);
+    try testing.expectEqualStrings("30", form.get("age").?);
+    try testing.expectEqual(@as(?i64, 30), form.getInt("age", i64));
+}
+
+test "parseForm empty body" {
+    const form = body_mod.parseForm("");
+    try testing.expectEqual(@as(usize, 0), form.len);
+}
+
+test "parseForm URL-encoded with special chars" {
+    const form = body_mod.parseForm("msg=hello+world&path=%2Fhome");
+    try testing.expectEqualStrings("hello+world", form.get("msg").?);
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("hello world", form.getDecode("msg", &buf).?);
+    try testing.expectEqualStrings("/home", form.getDecode("path", &buf).?);
+}
+
+test "detectContentType identifies form types" {
+    try testing.expectEqual(body_mod.ContentType.form_urlencoded, body_mod.detectContentType("application/x-www-form-urlencoded"));
+    try testing.expectEqual(body_mod.ContentType.multipart, body_mod.detectContentType("multipart/form-data; boundary=abc"));
+    try testing.expectEqual(body_mod.ContentType.json, body_mod.detectContentType("application/json"));
+    try testing.expectEqual(body_mod.ContentType.json, body_mod.detectContentType("application/json; charset=utf-8"));
+    try testing.expectEqual(body_mod.ContentType.text, body_mod.detectContentType("text/plain"));
+    try testing.expectEqual(body_mod.ContentType.unknown, body_mod.detectContentType(""));
+    try testing.expectEqual(body_mod.ContentType.unknown, body_mod.detectContentType("image/png"));
+}
+
+test "detectContentType case insensitive" {
+    try testing.expectEqual(body_mod.ContentType.json, body_mod.detectContentType("Application/JSON"));
+    try testing.expectEqual(body_mod.ContentType.form_urlencoded, body_mod.detectContentType("APPLICATION/X-WWW-FORM-URLENCODED"));
+}
+
+test "extractBoundary from Content-Type" {
+    try testing.expectEqualStrings(
+        "----WebKitFormBoundary",
+        body_mod.extractBoundary("multipart/form-data; boundary=----WebKitFormBoundary").?,
+    );
+    try testing.expectEqualStrings(
+        "abc123",
+        body_mod.extractBoundary("multipart/form-data; boundary=\"abc123\"").?,
+    );
+    try testing.expect(body_mod.extractBoundary("application/json") == null);
+}
+
+test "parseMultipart simple form" {
+    const boundary = "----formdata";
+    const body =
+        "------formdata\r\n" ++
+        "Content-Disposition: form-data; name=\"username\"\r\n" ++
+        "\r\n" ++
+        "Alice\r\n" ++
+        "------formdata\r\n" ++
+        "Content-Disposition: form-data; name=\"email\"\r\n" ++
+        "\r\n" ++
+        "alice@example.com\r\n" ++
+        "------formdata--\r\n";
+
+    const result = body_mod.parseMultipart(body, boundary);
+    try testing.expectEqual(@as(usize, 2), result.len);
+    try testing.expectEqualStrings("username", result.parts[0].name);
+    try testing.expectEqualStrings("Alice", result.parts[0].data);
+    try testing.expectEqualStrings("email", result.parts[1].name);
+    try testing.expectEqualStrings("alice@example.com", result.parts[1].data);
+}
+
+test "parseMultipart with file" {
+    const boundary = "----formdata";
+    const body =
+        "------formdata\r\n" ++
+        "Content-Disposition: form-data; name=\"file\"; filename=\"test.txt\"\r\n" ++
+        "Content-Type: text/plain\r\n" ++
+        "\r\n" ++
+        "file contents here\r\n" ++
+        "------formdata--\r\n";
+
+    const result = body_mod.parseMultipart(body, boundary);
+    try testing.expectEqual(@as(usize, 1), result.len);
+    try testing.expectEqualStrings("file", result.parts[0].name);
+    try testing.expectEqualStrings("test.txt", result.parts[0].filename.?);
+    try testing.expectEqualStrings("text/plain", result.parts[0].content_type);
+    try testing.expectEqualStrings("file contents here", result.parts[0].data);
+}
+
+test "parseMultipart get and getFile" {
+    const boundary = "----formdata";
+    const body =
+        "------formdata\r\n" ++
+        "Content-Disposition: form-data; name=\"title\"\r\n" ++
+        "\r\n" ++
+        "My Upload\r\n" ++
+        "------formdata\r\n" ++
+        "Content-Disposition: form-data; name=\"doc\"; filename=\"doc.pdf\"\r\n" ++
+        "Content-Type: application/pdf\r\n" ++
+        "\r\n" ++
+        "PDF DATA\r\n" ++
+        "------formdata--\r\n";
+
+    const result = body_mod.parseMultipart(body, boundary);
+    try testing.expectEqual(@as(usize, 2), result.len);
+
+    const title = result.get("title").?;
+    try testing.expectEqualStrings("My Upload", title.data);
+    try testing.expect(title.filename == null);
+
+    const doc = result.getFile("doc").?;
+    try testing.expectEqualStrings("doc.pdf", doc.filename.?);
+    try testing.expectEqualStrings("PDF DATA", doc.data);
+
+    // getFile should not return non-file parts
+    try testing.expect(result.getFile("title") == null);
+}
+
+test "Request.formData parses body as form" {
+    const req = Request{
+        .method = .POST,
+        .path = "/submit",
+        .query = null,
+        .headers = .{},
+        .body = "name=Bob&role=admin",
+        .raw_header = "",
+    };
+    const form = req.formData();
+    try testing.expectEqualStrings("Bob", form.get("name").?);
+    try testing.expectEqualStrings("admin", form.get("role").?);
+}
+
+test "Request.formData with no body returns empty" {
+    const req = Request{
+        .method = .POST,
+        .path = "/submit",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    const form = req.formData();
+    try testing.expectEqual(@as(usize, 0), form.paramCount());
+}
+
+test "Request.contentType detects from header" {
+    var req = Request{
+        .method = .POST,
+        .path = "/submit",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    req.headers.set("Content-Type", "application/json");
+    try testing.expectEqual(body_mod.ContentType.json, req.contentType());
 }
 
 test "Router staticDir with cache control" {

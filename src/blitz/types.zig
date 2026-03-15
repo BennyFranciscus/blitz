@@ -2,6 +2,10 @@ const std = @import("std");
 const mem = std.mem;
 const query_mod = @import("query.zig");
 const Query = query_mod.Query;
+const body_mod = @import("body.zig");
+const FormData = body_mod.FormData;
+const ContentType = body_mod.ContentType;
+const MultipartResult = body_mod.MultipartResult;
 
 // ── HTTP Method ─────────────────────────────────────────────────────
 pub const Method = enum {
@@ -166,6 +170,28 @@ pub const Request = struct {
     pub fn queryParsed(self: *const Request) Query {
         const q = self.query orelse return Query{};
         return Query.parse(q);
+    }
+
+    /// Parse request body as URL-encoded form data (application/x-www-form-urlencoded).
+    /// Returns a FormData (Query) struct with typed access.
+    pub fn formData(self: *const Request) FormData {
+        const b = self.body orelse return FormData{};
+        return body_mod.parseForm(b);
+    }
+
+    /// Detect the content type of the request from the Content-Type header.
+    pub fn contentType(self: *const Request) ContentType {
+        const ct = self.headers.get("Content-Type") orelse return .unknown;
+        return body_mod.detectContentType(ct);
+    }
+
+    /// Parse request body as multipart/form-data.
+    /// Extracts the boundary from Content-Type header automatically.
+    pub fn multipart(self: *const Request) ?MultipartResult {
+        const ct = self.headers.get("Content-Type") orelse return null;
+        const boundary = body_mod.extractBoundary(ct) orelse return null;
+        const b = self.body orelse return null;
+        return body_mod.parseMultipart(b, boundary);
     }
 };
 
