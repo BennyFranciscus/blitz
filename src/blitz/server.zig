@@ -10,6 +10,7 @@ const Router = @import("router.zig").Router;
 const pool_mod = @import("pool.zig");
 const ConnPool = pool_mod.ConnPool;
 const ConnState = pool_mod.ConnState;
+const compress_mod = @import("compress.zig");
 const Request = types.Request;
 const Response = types.Response;
 
@@ -32,6 +33,7 @@ pub const Config = struct {
     threads: ?usize = null, // null = auto-detect
     keep_alive_timeout: u32 = 60, // seconds (0 = disable)
     shutdown_timeout: u32 = 30, // seconds to drain connections before force-close (0 = immediate)
+    compression: bool = true, // enable gzip/deflate response compression
 };
 
 // ── Shared shutdown state (atomic, shared across worker threads) ─────
@@ -125,11 +127,15 @@ pub const Server = struct {
 // Default pool size per worker thread
 const POOL_SIZE: usize = 4096;
 
+// Per-thread compression buffer size (enough for most responses)
+const COMPRESS_BUF_SIZE: usize = 131072; // 128KB
+
 fn workerThread(router: *Router, config: Config, is_primary: bool) void {
     const alloc = std.heap.c_allocator;
     const port = config.port;
     const ka_timeout: i64 = @intCast(config.keep_alive_timeout);
     const drain_timeout: i64 = @intCast(config.shutdown_timeout);
+    const compression_enabled = config.compression;
 
     // Initialize connection pool for this worker
     var pool = ConnPool.init(alloc, POOL_SIZE) catch return;
@@ -291,6 +297,7 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                 }
 
                 // Parse and handle pipelined requests
+                var compress_buf: [COMPRESS_BUF_SIZE]u8 = undefined;
                 var off: usize = 0;
                 while (off < st.read_len) {
                     const result = parser.parse(st.read_buf[off..st.read_len]) orelse break;
@@ -303,6 +310,12 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                     }
 
                     router.handle(&req, &res);
+
+                    // Apply response compression if enabled
+                    if (compression_enabled) {
+                        _ = compress_mod.compressResponse(&compress_buf, &req, &res);
+                    }
+
                     res.writeTo(&st.write_list);
 
                     off += result.total_len;

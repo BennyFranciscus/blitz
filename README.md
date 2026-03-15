@@ -18,6 +18,7 @@ A blazing-fast HTTP/1.1 micro web framework for Zig.
 - **Request body parsing** — URL-encoded forms and multipart/form-data with typed access
 - **Cookie support** — parse request cookies and set response cookies with full RFC 6265 options
 - **Redirect helpers** — `redirect`, `redirectTemp`, `redirectPerm` for clean navigation
+- **Response compression** — automatic gzip/deflate compression for text responses (configurable)
 - **Graceful shutdown** — handles SIGTERM/SIGINT, drains in-flight connections, configurable timeout
 - **Keep-alive timeout** — automatic idle connection cleanup via timerfd
 - **Structured errors** — consistent JSON error responses out of the box
@@ -495,6 +496,52 @@ fn shutdownAware(req: *blitz.Request, res: *blitz.Response) bool {
 }
 ```
 
+### Response Compression
+
+Blitz automatically compresses responses with gzip or deflate when:
+
+- The client sends `Accept-Encoding: gzip` (or `deflate`)
+- The response body is at least 256 bytes
+- The Content-Type is compressible (text/*, application/json, application/xml, etc.)
+- The response isn't already compressed or pre-computed (`rawResponse`)
+
+Compression is **enabled by default** and handled transparently in the server layer — no middleware needed.
+
+```zig
+var server = blitz.Server.init(&router, .{
+    .port = 8080,
+    .compression = true,  // default — automatic gzip/deflate
+});
+
+// Disable compression (e.g., for benchmarks where every microsecond counts)
+var server2 = blitz.Server.init(&router, .{
+    .compression = false,
+});
+```
+
+**How it works:**
+- After each handler runs, blitz checks `Accept-Encoding` and compresses the body if beneficial
+- Uses Zig's `std.compress.gzip` (fast level) for minimal latency overhead
+- Adds `Content-Encoding: gzip` and `Vary: Accept-Encoding` headers automatically
+- If compressed output is larger than the original, compression is skipped (no wasted bytes)
+- Pre-computed `rawResponse()` calls bypass compression entirely (benchmark fast path)
+
+**Manual compression** is also available if you need finer control:
+
+```zig
+const blitz = @import("blitz");
+
+fn handler(req: *blitz.Request, res: *blitz.Response) void {
+    _ = res.json(large_json_string);
+
+    // Check if compression is worthwhile
+    if (blitz.shouldCompress(req, res)) {
+        var buf: [65536]u8 = undefined;
+        _ = blitz.compressResponse(&buf, req, res);
+    }
+}
+```
+
 ## Architecture
 
 ```
@@ -510,9 +557,10 @@ src/
 │   ├── json.zig       # Comptime JSON serializer (Json, JsonObject, JsonArray)
 │   ├── body.zig       # Request body parsing (URL-encoded forms, multipart/form-data)
 │   ├── cookie.zig     # Cookie parsing and Set-Cookie builder (RFC 6265)
+│   ├── compress.zig   # Response compression (gzip/deflate, Accept-Encoding negotiation)
 │   ├── errors.zig     # Structured error responses (sendError, badRequest, etc.)
 │   ├── static.zig     # Static file serving (MIME detection, path security, file reading)
-│   └── tests.zig      # Unit tests for all modules (155 tests)
+│   └── tests.zig      # Unit tests for all modules (166 tests)
 ├── main.zig           # HttpArena benchmark entry point
 examples/
 └── hello.zig          # Example app with all features
@@ -533,6 +581,7 @@ examples/
 - **Query parsing** — structured Query type with getInt/getBool/getAll/getDecode, zero-copy raw access or URL-decoded
 - **Cookie support** — zero-copy request cookie parsing, Set-Cookie builder with Max-Age/Path/Domain/Secure/HttpOnly/SameSite
 - **Keep-alive timeout** — timerfd-based idle connection sweep, configurable timeout per server
+- **Response compression** — automatic gzip/deflate using `std.compress.gzip`, fast level for low latency, skips tiny bodies and incompressible types
 - **Graceful shutdown** — self-pipe trick for signal delivery, atomic flag across workers, connection draining with configurable timeout
 
 ## Building
