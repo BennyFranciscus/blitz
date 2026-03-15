@@ -7,6 +7,7 @@ const router_mod = @import("router.zig");
 const parser_mod = @import("parser.zig");
 const json_mod = @import("json.zig");
 const errors_mod = @import("errors.zig");
+const static_mod = @import("static.zig");
 
 const Method = types.Method;
 const StatusCode = types.StatusCode;
@@ -745,4 +746,240 @@ test "jsonNotFoundHandler" {
     errors_mod.jsonNotFoundHandler(&req, &res);
     try testing.expectEqual(StatusCode.not_found, res.status);
     try testing.expectEqualStrings("application/json", res.headers.get("Content-Type").?);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Static file serving tests
+// ════════════════════════════════════════════════════════════════════
+
+// ── MIME type tests ─────────────────────────────────────────────────
+
+test "mimeFromPath returns correct MIME for common extensions" {
+    try testing.expectEqualStrings("text/html; charset=utf-8", static_mod.mimeFromPath("index.html"));
+    try testing.expectEqualStrings("text/css; charset=utf-8", static_mod.mimeFromPath("style.css"));
+    try testing.expectEqualStrings("application/javascript; charset=utf-8", static_mod.mimeFromPath("app.js"));
+    try testing.expectEqualStrings("application/json; charset=utf-8", static_mod.mimeFromPath("data.json"));
+    try testing.expectEqualStrings("image/png", static_mod.mimeFromPath("logo.png"));
+    try testing.expectEqualStrings("image/jpeg", static_mod.mimeFromPath("photo.jpg"));
+    try testing.expectEqualStrings("image/jpeg", static_mod.mimeFromPath("photo.jpeg"));
+    try testing.expectEqualStrings("image/svg+xml", static_mod.mimeFromPath("icon.svg"));
+    try testing.expectEqualStrings("font/woff2", static_mod.mimeFromPath("font.woff2"));
+    try testing.expectEqualStrings("application/pdf", static_mod.mimeFromPath("doc.pdf"));
+    try testing.expectEqualStrings("application/wasm", static_mod.mimeFromPath("module.wasm"));
+}
+
+test "mimeFromPath handles paths with directories" {
+    try testing.expectEqualStrings("text/css; charset=utf-8", static_mod.mimeFromPath("css/style.css"));
+    try testing.expectEqualStrings("application/javascript; charset=utf-8", static_mod.mimeFromPath("js/bundle/app.mjs"));
+}
+
+test "mimeFromPath returns octet-stream for unknown extension" {
+    try testing.expectEqualStrings("application/octet-stream", static_mod.mimeFromPath("file.xyz"));
+    try testing.expectEqualStrings("application/octet-stream", static_mod.mimeFromPath("noext"));
+}
+
+test "mimeFromPath handles uppercase extensions" {
+    try testing.expectEqualStrings("text/html; charset=utf-8", static_mod.mimeFromPath("index.HTML"));
+    try testing.expectEqualStrings("image/png", static_mod.mimeFromPath("logo.PNG"));
+}
+
+// ── Extension extraction tests ──────────────────────────────────────
+
+test "extensionOf extracts extension" {
+    try testing.expectEqualStrings("html", static_mod.extensionOf("index.html"));
+    try testing.expectEqualStrings("css", static_mod.extensionOf("path/to/style.css"));
+    try testing.expectEqualStrings("gz", static_mod.extensionOf("archive.tar.gz"));
+    try testing.expectEqualStrings("", static_mod.extensionOf("noext"));
+    try testing.expectEqualStrings("", static_mod.extensionOf(""));
+}
+
+test "extensionOf handles dotfiles" {
+    try testing.expectEqualStrings("gitignore", static_mod.extensionOf(".gitignore"));
+}
+
+// ── Path sanitization tests ─────────────────────────────────────────
+
+test "sanitizePath allows normal paths" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("style.css", static_mod.sanitizePath(&buf, "style.css").?);
+    try testing.expectEqualStrings("css/style.css", static_mod.sanitizePath(&buf, "css/style.css").?);
+    try testing.expectEqualStrings("a/b/c.txt", static_mod.sanitizePath(&buf, "a/b/c.txt").?);
+}
+
+test "sanitizePath rejects traversal" {
+    var buf: [256]u8 = undefined;
+    try testing.expect(static_mod.sanitizePath(&buf, "../etc/passwd") == null);
+    try testing.expect(static_mod.sanitizePath(&buf, "../../secret") == null);
+}
+
+test "sanitizePath allows safe relative paths" {
+    var buf: [256]u8 = undefined;
+    // Going up then back down within the root is fine
+    try testing.expectEqualStrings("b.txt", static_mod.sanitizePath(&buf, "a/../b.txt").?);
+}
+
+test "sanitizePath rejects absolute paths" {
+    var buf: [256]u8 = undefined;
+    try testing.expect(static_mod.sanitizePath(&buf, "/etc/passwd") == null);
+}
+
+test "sanitizePath skips double slashes and dots" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("a/b.txt", static_mod.sanitizePath(&buf, "a//./b.txt").?);
+}
+
+test "sanitizePath rejects empty result" {
+    var buf: [256]u8 = undefined;
+    try testing.expect(static_mod.sanitizePath(&buf, "") == null);
+    try testing.expect(static_mod.sanitizePath(&buf, ".") == null);
+    try testing.expect(static_mod.sanitizePath(&buf, "./") == null);
+}
+
+test "sanitizePath rejects null bytes" {
+    var buf: [256]u8 = undefined;
+    try testing.expect(static_mod.sanitizePath(&buf, "file\x00.txt") == null);
+}
+
+// ── Router static dir integration tests ─────────────────────────────
+// These tests use /tmp/blitz-test-static/ as a scratch directory since
+// testing.tmpDir() may not be available in all sandbox environments.
+
+const test_static_root = "/tmp/blitz-test-static";
+
+fn setupTestStaticDir() bool {
+    // Create test directory structure
+    const dir = std.fs.openDirAbsolute("/tmp", .{}) catch return false;
+    _ = dir;
+    std.fs.makeDirAbsolute(test_static_root) catch |e| {
+        if (e != error.PathAlreadyExists) return false;
+    };
+    std.fs.makeDirAbsolute(test_static_root ++ "/css") catch |e| {
+        if (e != error.PathAlreadyExists) return false;
+    };
+
+    // Write test files using cwd().writeFile
+    const d = std.fs.openDirAbsolute(test_static_root, .{}) catch return false;
+    d.writeFile(.{ .sub_path = "index.html", .data = "<h1>Hello Static</h1>" }) catch return false;
+    d.writeFile(.{ .sub_path = "app.js", .data = "console.log('hi');" }) catch return false;
+    d.writeFile(.{ .sub_path = "test.txt", .data = "hello" }) catch return false;
+
+    const css_dir = std.fs.openDirAbsolute(test_static_root ++ "/css", .{}) catch return false;
+    css_dir.writeFile(.{ .sub_path = "style.css", .data = "body { color: red; }" }) catch return false;
+
+    return true;
+}
+
+test "Router staticDir serves files from disk" {
+    if (!setupTestStaticDir()) return; // skip if can't create files
+
+    var router = Router.init(std.heap.page_allocator);
+    router.staticDir("/static", test_static_root, .{});
+
+    // Test serving index.html
+    var req = Request{
+        .method = .GET,
+        .path = "/static/index.html",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    var res = Response{};
+    router.handle(&req, &res);
+    try testing.expectEqual(StatusCode.ok, res.status);
+    try testing.expectEqualStrings("<h1>Hello Static</h1>", res.body.?);
+    try testing.expectEqualStrings("text/html; charset=utf-8", res.headers.get("Content-Type").?);
+
+    // Test serving CSS file in subdirectory
+    var req2 = Request{
+        .method = .GET,
+        .path = "/static/css/style.css",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    var res2 = Response{};
+    router.handle(&req2, &res2);
+    try testing.expectEqual(StatusCode.ok, res2.status);
+    try testing.expectEqualStrings("body { color: red; }", res2.body.?);
+    try testing.expectEqualStrings("text/css; charset=utf-8", res2.headers.get("Content-Type").?);
+}
+
+test "Router staticDir returns 404 for missing files" {
+    if (!setupTestStaticDir()) return;
+
+    var router = Router.init(std.heap.page_allocator);
+    router.staticDir("/files", test_static_root, .{});
+
+    var req = Request{
+        .method = .GET,
+        .path = "/files/nonexistent.txt",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    var res = Response{};
+    router.handle(&req, &res);
+    try testing.expectEqual(StatusCode.not_found, res.status);
+}
+
+test "Router staticDir blocks path traversal" {
+    if (!setupTestStaticDir()) return;
+
+    var router = Router.init(std.heap.page_allocator);
+    router.staticDir("/static", test_static_root, .{});
+
+    var req = Request{
+        .method = .GET,
+        .path = "/static/../../../etc/passwd",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    var res = Response{};
+    router.handle(&req, &res);
+    try testing.expectEqual(StatusCode.not_found, res.status);
+}
+
+test "Router staticDir only serves GET and HEAD" {
+    if (!setupTestStaticDir()) return;
+
+    var router = Router.init(std.heap.page_allocator);
+    router.staticDir("/files", test_static_root, .{});
+
+    // POST should not serve static files
+    var req = Request{
+        .method = .POST,
+        .path = "/files/test.txt",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    var res = Response{};
+    router.handle(&req, &res);
+    try testing.expectEqual(StatusCode.not_found, res.status);
+}
+
+test "Router staticDir with cache control" {
+    if (!setupTestStaticDir()) return;
+
+    var router = Router.init(std.heap.page_allocator);
+    router.staticDir("/assets", test_static_root, .{ .cache_control = "public, max-age=31536000" });
+
+    var req = Request{
+        .method = .GET,
+        .path = "/assets/app.js",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    var res = Response{};
+    router.handle(&req, &res);
+    try testing.expectEqual(StatusCode.ok, res.status);
+    try testing.expectEqualStrings("public, max-age=31536000", res.headers.get("Cache-Control").?);
 }

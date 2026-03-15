@@ -12,6 +12,7 @@ A blazing-fast HTTP/1.1 micro web framework for Zig.
 - **Middleware chain** — composable middleware with short-circuit support
 - **Route groups** — organize routes under shared prefixes
 - **JSON builder** — comptime-powered zero-allocation JSON serialization
+- **Static file serving** — serve files from disk with MIME detection, path traversal protection, and cache control
 - **Structured errors** — consistent JSON error responses out of the box
 - **Clean API** — define routes and handlers, blitz handles the rest
 
@@ -185,6 +186,29 @@ const list = arr.finish() orelse "[]";
 //           optionals (null fields skipped), enums (as strings)
 ```
 
+### Static File Serving
+
+Serve files from disk with automatic MIME type detection, directory traversal protection, and optional cache control.
+
+```zig
+// Serve files from ./public at /static/*
+router.staticDir("/static", "./public", .{});
+
+// With options
+router.staticDir("/assets", "./dist", .{
+    .cache_control = "public, max-age=31536000",  // immutable assets
+    .index = true,                                  // serve index.html for directories
+    .max_file_size = 10 * 1024 * 1024,             // 10MB max
+});
+```
+
+**Features:**
+- **40+ MIME types** — HTML, CSS, JS, images, fonts, media, archives, WASM
+- **Path traversal protection** — rejects `../`, absolute paths, null bytes
+- **Directory index** — automatically serves `index.html` for directory paths
+- **Cache-Control** — optional header for browser caching
+- **GET/HEAD only** — other methods fall through to route matching
+
 ### Error Handling
 
 Structured JSON error responses with convenience helpers.
@@ -239,6 +263,7 @@ src/
 │   ├── server.zig     # Epoll event loop, connection management
 │   ├── json.zig       # Comptime JSON serializer (Json, JsonObject, JsonArray)
 │   ├── errors.zig     # Structured error responses (sendError, badRequest, etc.)
+│   ├── static.zig     # Static file serving (MIME detection, path security, file reading)
 │   └── tests.zig      # Unit tests for all modules
 ├── main.zig           # HttpArena benchmark entry point
 examples/
@@ -255,6 +280,7 @@ examples/
 - **Linear middleware** — `fn(*Req, *Res) bool` is simpler and faster than callback chains
 - **Route groups** — prefix concatenation at init time, zero runtime overhead
 - **Comptime JSON** — Zig's comptime introspects struct fields at compile time, no reflection cost at runtime
+- **Static file serving** — MIME detection, path sanitization, and file reading with configurable cache headers
 
 ## Building
 

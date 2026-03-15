@@ -1,11 +1,13 @@
 const std = @import("std");
 const mem = std.mem;
 const types = @import("types.zig");
+const static_mod = @import("static.zig");
 const Method = types.Method;
 const Request = types.Request;
 const Response = types.Response;
 const HandlerFn = types.HandlerFn;
 const MiddlewareFn = types.MiddlewareFn;
+const StaticDirConfig = static_mod.StaticDirConfig;
 
 // ── Radix-trie Router ──────────────────────────────────────────────
 // Fast path matching with support for:
@@ -52,11 +54,32 @@ pub const Router = struct {
     // Global middleware chain
     middleware: [MAX_MIDDLEWARE]MiddlewareFn = undefined,
     middleware_count: usize = 0,
+    // Static directory mappings
+    static_dirs: [static_mod.MAX_STATIC_DIRS]StaticDirConfig = undefined,
+    static_dir_count: usize = 0,
 
     pub fn init(alloc: std.mem.Allocator) Router {
         const root = alloc.create(Node) catch @panic("OOM");
         root.* = .{};
         return .{ .root = root, .alloc = alloc };
+    }
+
+    /// Serve static files from a directory.
+    /// Example: router.staticDir("/static", "./public", .{});
+    pub fn staticDir(self: *Router, prefix: []const u8, root_dir: []const u8, opts: struct {
+        index: bool = true,
+        max_file_size: usize = 50 * 1024 * 1024,
+        cache_control: []const u8 = "",
+    }) void {
+        if (self.static_dir_count >= static_mod.MAX_STATIC_DIRS) return;
+        self.static_dirs[self.static_dir_count] = .{
+            .prefix = prefix,
+            .root = root_dir,
+            .index = opts.index,
+            .max_file_size = opts.max_file_size,
+            .cache_control = opts.cache_control,
+        };
+        self.static_dir_count += 1;
     }
 
     /// Add global middleware (runs on every request before the handler).
@@ -218,11 +241,60 @@ pub const Router = struct {
         if (self.match(req.method, req.path, &params)) |handler| {
             req.params = params;
             handler(req, res);
+        } else if (self.tryStaticFile(req, res)) {
+            // Static file served successfully
         } else if (self.not_found_handler) |nf| {
             nf(req, res);
         } else {
             _ = res.setStatus(.not_found).text("Not Found");
         }
+    }
+
+    /// Try to serve a static file from configured static directories.
+    /// Only serves GET and HEAD requests.
+    fn tryStaticFile(self: *Router, req: *Request, res: *Response) bool {
+        // Only serve static files for GET and HEAD
+        if (req.method != .GET and req.method != .HEAD) return false;
+
+        for (self.static_dirs[0..self.static_dir_count]) |dir_config| {
+            const prefix = mem.trimRight(u8, dir_config.prefix, "/");
+
+            // Check if the request path starts with the prefix
+            if (!mem.startsWith(u8, req.path, prefix)) continue;
+
+            // Extract the filepath after the prefix
+            const remaining = req.path[prefix.len..];
+
+            // Must be exactly the prefix or followed by /
+            if (remaining.len == 0) {
+                // Exact prefix match — try index
+                if (dir_config.index) {
+                    if (static_mod.serveFile(res, dir_config.root, "index.html", dir_config)) {
+                        return true;
+                    }
+                }
+                continue;
+            }
+
+            if (remaining[0] != '/') continue;
+
+            // Strip leading slash to get relative filepath
+            const filepath = remaining[1..];
+            if (filepath.len == 0) {
+                if (dir_config.index) {
+                    if (static_mod.serveFile(res, dir_config.root, "index.html", dir_config)) {
+                        return true;
+                    }
+                }
+                continue;
+            }
+
+            if (static_mod.serveFile(res, dir_config.root, filepath, dir_config)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// Set a custom 404 handler

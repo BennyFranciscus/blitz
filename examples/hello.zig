@@ -99,6 +99,13 @@ pub fn main() !void {
     api.get("/users/:id", getUser);
     api.post("/users", createUser);
 
+    // Static file serving — serves files from ./public at /static/*
+    // Includes automatic MIME type detection, path traversal protection,
+    // directory index (index.html), and optional cache control headers.
+    router.staticDir("/static", "./public", .{
+        .cache_control = "public, max-age=3600",
+    });
+
     // JSON 404 handler
     router.notFound(blitz.jsonNotFoundHandler);
 

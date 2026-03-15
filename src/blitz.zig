@@ -36,6 +36,7 @@ pub const parser_mod = @import("blitz/parser.zig");
 pub const server_mod = @import("blitz/server.zig");
 pub const json_mod = @import("blitz/json.zig");
 pub const errors_mod = @import("blitz/errors.zig");
+pub const static_mod = @import("blitz/static.zig");
 
 // Re-export main types for convenience
 pub const Request = types.Request;
@@ -54,6 +55,13 @@ pub const Config = server_mod.Config;
 pub const Json = json_mod.Json;
 pub const JsonObject = json_mod.JsonObject;
 pub const JsonArray = json_mod.JsonArray;
+
+// Static file serving
+pub const serveFile = static_mod.serveFile;
+pub const mimeFromPath = static_mod.mimeFromPath;
+pub const mimeFromExt = static_mod.mimeFromExt;
+pub const sanitizePath = static_mod.sanitizePath;
+pub const StaticDirConfig = static_mod.StaticDirConfig;
 
 // Error handling
 pub const sendError = errors_mod.sendError;
@@ -77,4 +85,5 @@ pub const parse = parser_mod.parse;
 // Tests (pulled in by `zig build test`)
 test {
     _ = @import("blitz/tests.zig");
+    _ = @import("blitz/static.zig");
 }
