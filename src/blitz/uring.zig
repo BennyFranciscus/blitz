@@ -9,6 +9,7 @@ const types = @import("types.zig");
 const parser = @import("parser.zig");
 const Router = @import("router.zig").Router;
 const compress_mod = @import("compress.zig");
+const log_mod = @import("log.zig");
 const Request = types.Request;
 const Response = types.Response;
 
@@ -100,6 +101,7 @@ pub const Config = struct {
     threads: ?usize = null,
     compression: bool = true,
     shutdown_timeout: u32 = 30,
+    logging: log_mod.LogConfig = .{},
 };
 
 // ── Shared shutdown state ───────────────────────────────────────────
@@ -167,6 +169,8 @@ pub const UringServer = struct {
 fn workerThread(router: *Router, config: Config, is_primary: bool) void {
     const alloc = std.heap.c_allocator;
     const compression_enabled = config.compression;
+    const log_config = config.logging;
+    const logging = log_config.enabled;
 
     // Create listening socket with SO_REUSEPORT
     const sock: i32 = @intCast(posix.socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0) catch return);
@@ -351,10 +355,16 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                                     resp.headers.set("Connection", "close");
                                 }
 
+                                const req_start = if (logging) log_mod.now() else 0;
+
                                 router.handle(&req, &resp);
 
                                 if (compression_enabled) {
                                     _ = compress_mod.compressResponse(&compress_buf, &req, &resp);
+                                }
+
+                                if (logging) {
+                                    log_mod.logRequest(log_config, &req, &resp, req_start);
                                 }
 
                                 resp.writeTo(&st.write_buf);
