@@ -22,6 +22,7 @@ A blazing-fast HTTP/1.1 micro web framework for Zig.
 - **Redirect helpers** — `redirect`, `redirectTemp`, `redirectPerm` for clean navigation
 - **Response compression** — automatic gzip/deflate compression for text responses (configurable)
 - **Request logging** — structured text or JSON logging with latency tracking, level filtering, and slow request detection
+- **WebSocket support** — RFC 6455 frame parsing/building, upgrade handshake, ping/pong, close codes
 - **Graceful shutdown** — handles SIGTERM/SIGINT, drains in-flight connections, configurable timeout
 - **Keep-alive timeout** — automatic idle connection cleanup via timerfd
 - **Structured errors** — consistent JSON error responses out of the box
@@ -616,6 +617,41 @@ BLITZ_URING=1 ./blitz
 
 **Requirements:** Linux 5.19+ (6.1+ for DEFER_TASKRUN). Docker containers need `--privileged` or appropriate seccomp profile.
 
+### WebSocket
+
+Full RFC 6455 WebSocket support for building real-time applications:
+
+```zig
+const blitz = @import("blitz");
+const ws = blitz.WebSocket;
+
+fn handleWsUpgrade(req: *blitz.Request, res: *blitz.Response) void {
+    // Check if this is a WebSocket upgrade request
+    if (!ws.isUpgradeRequest(req)) {
+        _ = res.setStatus(.bad_request).text("Expected WebSocket upgrade");
+        return;
+    }
+
+    // Get the client's key
+    const key = req.header("Sec-WebSocket-Key") orelse return;
+
+    // Build and send the 101 Switching Protocols response
+    var buf: [512]u8 = undefined;
+    const upgrade_resp = ws.buildUpgradeResponse(&buf, key, null) orelse return;
+    _ = res.rawResponse(upgrade_resp);
+
+    // After upgrade, use ws.parseFrame() and ws.buildFrame() for communication
+}
+```
+
+**Frame operations:**
+- `ws.parseFrame(data)` — parse incoming frames (auto-unmasks client data)
+- `ws.buildFrame(buf, opcode, payload, fin)` — build outgoing frames (text, binary, ping, pong)
+- `ws.buildCloseFrame(buf, code, reason)` — build close frame with status code
+
+**Opcodes:** `.text`, `.binary`, `.close`, `.ping`, `.pong`, `.continuation`
+**Close codes:** `.normal`, `.going_away`, `.protocol_error`, `.too_large`, etc.
+
 ## Architecture
 
 ```
@@ -635,7 +671,8 @@ src/
 │   ├── compress.zig   # Response compression (gzip/deflate, Accept-Encoding negotiation)
 │   ├── errors.zig     # Structured error responses (sendError, badRequest, etc.)
 │   ├── static.zig     # Static file serving (MIME detection, path security, file reading)
-│   └── tests.zig      # Unit tests for all modules (166 tests)
+│   ├── websocket.zig  # WebSocket frames, handshake, close codes (RFC 6455)
+│   └── tests.zig      # Unit tests for all modules (195 tests)
 ├── main.zig           # HttpArena benchmark entry point
 examples/
 └── hello.zig          # Example app with all features
