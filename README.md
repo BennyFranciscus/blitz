@@ -9,7 +9,7 @@ A blazing-fast HTTP/1.1 micro web framework for Zig.
 - **Epoll + SO_REUSEPORT** — one accept socket per core, no lock contention
 - **Pre-computed responses** — bypass serialization for static content
 - **Pipeline batching** — handle multiple HTTP requests per read
-- **Middleware chain** — composable middleware with short-circuit support
+- **Middleware chain** — global and per-route middleware with short-circuit support
 - **Route groups** — organize routes under shared prefixes
 - **JSON builder** — comptime-powered zero-allocation JSON serialization
 - **Static file serving** — serve files from disk with MIME detection, path traversal protection, and cache control
@@ -71,27 +71,48 @@ router.notFound(blitz.jsonNotFoundHandler);
 
 ### Middleware
 
-Middleware functions run before every handler. Return `true` to continue, `false` to short-circuit (e.g., auth failure).
+Middleware functions return `true` to continue, `false` to short-circuit (e.g., auth denial).
+
+**Global middleware** runs on every request:
 
 ```zig
-// Simple middleware signature: fn(*Request, *Response) bool
 fn cors(_: *blitz.Request, res: *blitz.Response) bool {
     res.headers.set("Access-Control-Allow-Origin", "*");
-    return true; // continue to next middleware / handler
+    return true;
 }
 
+router.use(cors); // Runs on all requests
+```
+
+**Per-route middleware** runs only on matching routes:
+
+```zig
 fn auth(req: *blitz.Request, res: *blitz.Response) bool {
     if (req.headers.get("Authorization") == null) {
         blitz.unauthorized(res, "Token required");
-        return false; // stop here — don't call the handler
+        return false; // stop here
     }
     return true;
 }
 
-// Register middleware (runs in order)
-router.use(cors);
-router.use(auth);
+// Attach middleware to a path prefix — applies to all routes under it
+router.useAt("/api", auth);
+
+// Or attach middleware to a route group (same effect, cleaner API)
+const api = router.group("/api/v1");
+api.use(auth);           // Only /api/v1/* routes run this
+api.get("/users", listUsers);
+api.get("/users/:id", getUser);
+
+// Nested groups stack middleware
+const admin = api.group("/admin");
+admin.use(adminOnly);    // Runs auth + adminOnly for /api/v1/admin/*
+admin.get("/stats", adminStats);
 ```
+
+**Execution order:** global middleware → per-route middleware (collected along the matched path) → handler.
+
+Middleware on parent paths runs before middleware on child paths, so you can layer auth, logging, rate limiting etc. at different levels of your route tree.
 
 ### Route Groups
 
@@ -319,7 +340,7 @@ src/
 ├── blitz.zig          # Module root — re-exports everything
 ├── blitz/
 │   ├── types.zig      # Request, Response, Method, StatusCode, Headers
-│   ├── router.zig     # Radix-trie router with middleware, groups, params & wildcards
+│   ├── router.zig     # Radix-trie router with global + per-route middleware, groups, params & wildcards
 │   ├── parser.zig     # Zero-copy HTTP/1.1 request parser
 │   ├── server.zig     # Epoll event loop, connection management
 │   ├── pool.zig       # Connection pool — pre-allocated ConnState objects
@@ -327,7 +348,7 @@ src/
 │   ├── json.zig       # Comptime JSON serializer (Json, JsonObject, JsonArray)
 │   ├── errors.zig     # Structured error responses (sendError, badRequest, etc.)
 │   ├── static.zig     # Static file serving (MIME detection, path security, file reading)
-│   └── tests.zig      # Unit tests for all modules (111 tests)
+│   └── tests.zig      # Unit tests for all modules (118 tests)
 ├── main.zig           # HttpArena benchmark entry point
 examples/
 └── hello.zig          # Example app with all features
@@ -340,7 +361,7 @@ examples/
 - **SO_REUSEPORT** — kernel distributes connections across worker threads
 - **Pre-computed responses** — full HTTP response built at startup for static data
 - **Radix trie over hash map** — better cache locality for path matching
-- **Linear middleware** — `fn(*Req, *Res) bool` is simpler and faster than callback chains
+- **Layered middleware** — global + per-route middleware; `fn(*Req, *Res) bool` is simpler and faster than callback chains
 - **Route groups** — prefix concatenation at init time, zero runtime overhead
 - **Comptime JSON** — Zig's comptime introspects struct fields at compile time, no reflection cost at runtime
 - **Static file serving** — MIME detection, path sanitization, and file reading with configurable cache headers

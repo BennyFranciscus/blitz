@@ -1264,6 +1264,279 @@ test "ConnPool full cycle" {
     }
 }
 
+// ════════════════════════════════════════════════════════════════════
+// Per-route middleware tests
+// ════════════════════════════════════════════════════════════════════
+
+test "Per-route middleware runs for matching routes" {
+    var router = Router.init(std.heap.page_allocator);
+
+    // Attach middleware to /api prefix
+    router.useAt("/api", struct {
+        fn f(_: *Request, res: *Response) bool {
+            res.headers.set("X-Api-Auth", "checked");
+            return true;
+        }
+    }.f);
+
+    router.get("/api/users", dummyHandler);
+    router.get("/public/page", dummyHandler);
+
+    // Request to /api/users should run the middleware
+    var req = Request{
+        .method = .GET,
+        .path = "/api/users",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    var res = Response{};
+    router.handle(&req, &res);
+    try testing.expectEqualStrings("ok", res.body.?);
+    try testing.expectEqualStrings("checked", res.headers.get("X-Api-Auth").?);
+
+    // Request to /public/page should NOT have the middleware header
+    var req2 = Request{
+        .method = .GET,
+        .path = "/public/page",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    var res2 = Response{};
+    router.handle(&req2, &res2);
+    try testing.expectEqualStrings("ok", res2.body.?);
+    try testing.expect(res2.headers.get("X-Api-Auth") == null);
+}
+
+test "Per-route middleware can short-circuit" {
+    var router = Router.init(std.heap.page_allocator);
+
+    router.useAt("/admin", struct {
+        fn f(_: *Request, res: *Response) bool {
+            _ = res.setStatus(.forbidden).text("admin only");
+            return false;
+        }
+    }.f);
+
+    router.get("/admin/dashboard", struct {
+        fn f(_: *Request, res: *Response) void {
+            _ = res.text("secret dashboard");
+        }
+    }.f);
+
+    var req = Request{
+        .method = .GET,
+        .path = "/admin/dashboard",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    var res = Response{};
+    router.handle(&req, &res);
+    try testing.expectEqual(StatusCode.forbidden, res.status);
+    try testing.expectEqualStrings("admin only", res.body.?);
+}
+
+test "Per-route middleware inherits through nested paths" {
+    var router = Router.init(std.heap.page_allocator);
+
+    // Middleware on /api — should apply to /api/v1/users too
+    router.useAt("/api", struct {
+        fn f(_: *Request, res: *Response) bool {
+            res.headers.set("X-Api", "true");
+            return true;
+        }
+    }.f);
+
+    router.get("/api/v1/users", dummyHandler);
+
+    var req = Request{
+        .method = .GET,
+        .path = "/api/v1/users",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    var res = Response{};
+    router.handle(&req, &res);
+    try testing.expectEqualStrings("ok", res.body.?);
+    try testing.expectEqualStrings("true", res.headers.get("X-Api").?);
+}
+
+test "Per-route middleware stacks with global middleware" {
+    var router = Router.init(std.heap.page_allocator);
+
+    // Global middleware
+    router.use(struct {
+        fn f(_: *Request, res: *Response) bool {
+            res.headers.set("X-Global", "yes");
+            return true;
+        }
+    }.f);
+
+    // Route-level middleware
+    router.useAt("/api", struct {
+        fn f(_: *Request, res: *Response) bool {
+            res.headers.set("X-Route", "yes");
+            return true;
+        }
+    }.f);
+
+    router.get("/api/test", dummyHandler);
+
+    var req = Request{
+        .method = .GET,
+        .path = "/api/test",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    var res = Response{};
+    router.handle(&req, &res);
+    try testing.expectEqualStrings("yes", res.headers.get("X-Global").?);
+    try testing.expectEqualStrings("yes", res.headers.get("X-Route").?);
+}
+
+test "Multiple per-route middleware run in order" {
+    var router = Router.init(std.heap.page_allocator);
+
+    router.useAt("/api", struct {
+        fn f(_: *Request, res: *Response) bool {
+            res.headers.set("X-Order", "first");
+            return true;
+        }
+    }.f);
+
+    router.useAt("/api", struct {
+        fn f(_: *Request, res: *Response) bool {
+            res.headers.set("X-Order", "second");
+            return true;
+        }
+    }.f);
+
+    router.get("/api/test", dummyHandler);
+
+    var req = Request{
+        .method = .GET,
+        .path = "/api/test",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    var res = Response{};
+    router.handle(&req, &res);
+    try testing.expectEqualStrings("second", res.headers.get("X-Order").?);
+}
+
+test "Group.use attaches middleware to group prefix" {
+    var router = Router.init(std.heap.page_allocator);
+
+    const api = router.group("/api");
+    api.use(struct {
+        fn f(_: *Request, res: *Response) bool {
+            res.headers.set("X-Group-MW", "api");
+            return true;
+        }
+    }.f);
+
+    api.get("/items", dummyHandler);
+    router.get("/other", dummyHandler);
+
+    // Route under group should have middleware
+    var req = Request{
+        .method = .GET,
+        .path = "/api/items",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    var res = Response{};
+    router.handle(&req, &res);
+    try testing.expectEqualStrings("api", res.headers.get("X-Group-MW").?);
+
+    // Route outside group should not
+    var req2 = Request{
+        .method = .GET,
+        .path = "/other",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    var res2 = Response{};
+    router.handle(&req2, &res2);
+    try testing.expect(res2.headers.get("X-Group-MW") == null);
+}
+
+test "Nested group middleware stacks" {
+    var router = Router.init(std.heap.page_allocator);
+
+    const api = router.group("/api");
+    api.use(struct {
+        fn f(_: *Request, res: *Response) bool {
+            res.headers.set("X-Api", "yes");
+            return true;
+        }
+    }.f);
+
+    const admin = api.group("/admin");
+    admin.use(struct {
+        fn f(_: *Request, res: *Response) bool {
+            res.headers.set("X-Admin", "yes");
+            return true;
+        }
+    }.f);
+
+    admin.get("/stats", dummyHandler);
+
+    var req = Request{
+        .method = .GET,
+        .path = "/api/admin/stats",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    var res = Response{};
+    router.handle(&req, &res);
+    try testing.expectEqualStrings("yes", res.headers.get("X-Api").?);
+    try testing.expectEqualStrings("yes", res.headers.get("X-Admin").?);
+}
+
+test "Per-route middleware with path params" {
+    var router = Router.init(std.heap.page_allocator);
+
+    router.useAt("/users", struct {
+        fn f(_: *Request, res: *Response) bool {
+            res.headers.set("X-Users-MW", "applied");
+            return true;
+        }
+    }.f);
+
+    router.get("/users/:id", userHandler);
+
+    var req = Request{
+        .method = .GET,
+        .path = "/users/42",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    var res = Response{};
+    router.handle(&req, &res);
+    try testing.expectEqualStrings("42", res.body.?);
+    try testing.expectEqualStrings("applied", res.headers.get("X-Users-MW").?);
+}
+
 test "Router staticDir with cache control" {
     if (!setupTestStaticDir()) return;
 

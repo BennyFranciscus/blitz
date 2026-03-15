@@ -18,6 +18,15 @@ fn cors(_: *blitz.Request, res: *blitz.Response) bool {
 
 // ── Handlers ────────────────────────────────────────────────────────
 
+/// Auth middleware — only runs on routes that need it
+fn auth(req: *blitz.Request, res: *blitz.Response) bool {
+    if (req.headers.get("Authorization") == null) {
+        blitz.unauthorized(res, "Token required");
+        return false;
+    }
+    return true;
+}
+
 fn hello(_: *blitz.Request, res: *blitz.Response) void {
     _ = res.text("Hello, World!");
 }
@@ -109,8 +118,9 @@ pub fn main() !void {
     router.get("/hello/:name", greet);
     router.get("/search", search);
 
-    // API route group
+    // API route group with per-group auth middleware
     const api = router.group("/api/v1");
+    api.use(auth); // Only runs for /api/v1/* routes
     api.get("/health", health);
     api.get("/users", listUsers);
     api.get("/users/:id", getUser);

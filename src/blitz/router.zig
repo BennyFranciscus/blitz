@@ -19,6 +19,8 @@ const StaticDirConfig = static_mod.StaticDirConfig;
 const MAX_CHILDREN = 64;
 const MAX_METHODS = 7; // GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS
 const MAX_MIDDLEWARE = 16;
+const MAX_ROUTE_MW = 8; // Max middleware per node (route/group level)
+const MAX_PATH_MW = 32; // Max middleware collected along a matched path
 
 const Node = struct {
     // Path segment for this node
@@ -34,6 +36,9 @@ const Node = struct {
     // Wildcard child (e.g. *filepath)
     wildcard_child: ?*Node = null,
     wildcard_name: []const u8 = "",
+    // Per-node middleware (inherited by child routes)
+    node_middleware: [MAX_ROUTE_MW]MiddlewareFn = undefined,
+    node_middleware_count: usize = 0,
 
     fn methodIndex(m: Method) usize {
         return @intFromEnum(m);
@@ -44,6 +49,13 @@ const Node = struct {
             if (mem.eql(u8, child.segment, segment)) return child;
         }
         return null;
+    }
+
+    fn addMiddleware(self: *Node, mw: MiddlewareFn) void {
+        if (self.node_middleware_count < MAX_ROUTE_MW) {
+            self.node_middleware[self.node_middleware_count] = mw;
+            self.node_middleware_count += 1;
+        }
     }
 };
 
@@ -89,6 +101,60 @@ pub const Router = struct {
             self.middleware[self.middleware_count] = mw;
             self.middleware_count += 1;
         }
+    }
+
+    /// Add middleware to a specific path prefix.
+    /// All routes under this prefix will run this middleware (after global middleware).
+    /// Example: router.useAt("/api", authMiddleware);
+    pub fn useAt(self: *Router, pattern: []const u8, mw: MiddlewareFn) void {
+        const node = self.ensureNode(pattern);
+        node.addMiddleware(mw);
+    }
+
+    /// Navigate to (or create) the node for a given path pattern.
+    /// Used internally for attaching per-route middleware.
+    fn ensureNode(self: *Router, pattern: []const u8) *Node {
+        var node = self.root;
+        var path = pattern;
+        if (path.len > 0 and path[0] == '/') path = path[1..];
+        if (path.len == 0) return node;
+
+        var it = mem.splitScalar(u8, path, '/');
+        while (it.next()) |segment| {
+            if (segment.len == 0) continue;
+
+            if (segment[0] == ':') {
+                if (node.param_child == null) {
+                    const child = self.alloc.create(Node) catch @panic("OOM");
+                    child.* = .{};
+                    node.param_child = child;
+                    node.param_name = segment[1..];
+                }
+                node = node.param_child.?;
+            } else if (segment[0] == '*') {
+                if (node.wildcard_child == null) {
+                    const child = self.alloc.create(Node) catch @panic("OOM");
+                    child.* = .{};
+                    node.wildcard_child = child;
+                    node.wildcard_name = segment[1..];
+                }
+                node = node.wildcard_child.?;
+                break;
+            } else {
+                if (node.findChild(segment)) |child| {
+                    node = child;
+                } else {
+                    const child = self.alloc.create(Node) catch @panic("OOM");
+                    child.* = .{ .segment = segment };
+                    if (node.children_count < MAX_CHILDREN) {
+                        node.children[node.children_count] = child;
+                        node.children_count += 1;
+                    }
+                    node = child;
+                }
+            }
+        }
+        return node;
     }
 
     /// Register a handler for a method + path pattern
@@ -182,20 +248,46 @@ pub const Router = struct {
         return .{ .router = self, .prefix = prefix };
     }
 
+    /// Collected route middleware from a matched path
+    pub const RouteMiddleware = struct {
+        items: [MAX_PATH_MW]MiddlewareFn = undefined,
+        len: usize = 0,
+
+        pub fn append(self: *RouteMiddleware, mw_list: []const MiddlewareFn) void {
+            for (mw_list) |mw| {
+                if (self.len < MAX_PATH_MW) {
+                    self.items[self.len] = mw;
+                    self.len += 1;
+                }
+            }
+        }
+    };
+
     /// Match a request path and return the handler + fill params
     pub fn match(self: *Router, method: Method, path: []const u8, params: *Request.Params) ?HandlerFn {
+        var route_mw = RouteMiddleware{};
+        return self.matchWithMiddleware(method, path, params, &route_mw);
+    }
+
+    /// Match a request path and return the handler + fill params + collect per-route middleware
+    pub fn matchWithMiddleware(self: *Router, method: Method, path: []const u8, params: *Request.Params, route_mw: *RouteMiddleware) ?HandlerFn {
         var p = path;
         if (p.len > 0 and p[0] == '/') p = p[1..];
+
+        // Collect root node middleware
+        if (self.root.node_middleware_count > 0) {
+            route_mw.append(self.root.node_middleware[0..self.root.node_middleware_count]);
+        }
 
         // Root path
         if (p.len == 0) {
             return self.root.handlers[Node.methodIndex(method)];
         }
 
-        return matchNode(self.root, method, p, params);
+        return matchNode(self.root, method, p, params, route_mw);
     }
 
-    fn matchNode(node: *Node, method: Method, remaining: []const u8, params: *Request.Params) ?HandlerFn {
+    fn matchNode(node: *Node, method: Method, remaining: []const u8, params: *Request.Params, route_mw: *RouteMiddleware) ?HandlerFn {
         if (remaining.len == 0) {
             return node.handlers[Node.methodIndex(method)];
         }
@@ -208,29 +300,43 @@ pub const Router = struct {
         // 1. Try static children first (most specific)
         for (node.children[0..node.children_count]) |child| {
             if (mem.eql(u8, child.segment, segment)) {
-                if (matchNode(child, method, rest, params)) |h| return h;
+                const mw_before = route_mw.len;
+                if (child.node_middleware_count > 0) {
+                    route_mw.append(child.node_middleware[0..child.node_middleware_count]);
+                }
+                if (matchNode(child, method, rest, params, route_mw)) |h| return h;
+                // Rollback middleware on backtrack
+                route_mw.len = mw_before;
             }
         }
 
         // 2. Try parameter child
         if (node.param_child) |pchild| {
+            const mw_before = route_mw.len;
+            if (pchild.node_middleware_count > 0) {
+                route_mw.append(pchild.node_middleware[0..pchild.node_middleware_count]);
+            }
             params.set(node.param_name, segment);
-            if (matchNode(pchild, method, rest, params)) |h| return h;
-            // Rollback param on backtrack
+            if (matchNode(pchild, method, rest, params, route_mw)) |h| return h;
+            // Rollback param and middleware on backtrack
             if (params.len > 0) params.len -= 1;
+            route_mw.len = mw_before;
         }
 
         // 3. Try wildcard child
         if (node.wildcard_child) |_| {
             params.set(node.wildcard_name, remaining);
             const wnode = node.wildcard_child.?;
+            if (wnode.node_middleware_count > 0) {
+                route_mw.append(wnode.node_middleware[0..wnode.node_middleware_count]);
+            }
             return wnode.handlers[Node.methodIndex(method)];
         }
 
         return null;
     }
 
-    /// Handle a request — runs middleware chain, then finds route and calls handler
+    /// Handle a request — runs global middleware, per-route middleware, then handler
     pub fn handle(self: *Router, req: *Request, res: *Response) void {
         // Run global middleware chain
         for (self.middleware[0..self.middleware_count]) |mw| {
@@ -238,8 +344,13 @@ pub const Router = struct {
         }
 
         var params = Request.Params{};
-        if (self.match(req.method, req.path, &params)) |handler| {
+        var route_mw = RouteMiddleware{};
+        if (self.matchWithMiddleware(req.method, req.path, &params, &route_mw)) |handler| {
             req.params = params;
+            // Run per-route middleware collected along the matched path
+            for (route_mw.items[0..route_mw.len]) |mw| {
+                if (!mw(req, res)) return;
+            }
             handler(req, res);
         } else if (self.tryStaticFile(req, res)) {
             // Static file served successfully
@@ -326,6 +437,12 @@ pub const Group = struct {
     pub fn route(self: Group, method: Method, pattern: []const u8, handler: HandlerFn) void {
         const full = self.buildPath(pattern) orelse return;
         self.router.route(method, full, handler);
+    }
+
+    /// Add middleware to this group's prefix.
+    /// All routes registered under this group will inherit this middleware.
+    pub fn use(self: Group, mw: MiddlewareFn) void {
+        self.router.useAt(self.prefix, mw);
     }
 
     pub fn get(self: Group, pattern: []const u8, handler: HandlerFn) void {
