@@ -16,15 +16,27 @@ pub const ConnState = struct {
     write_off: usize = 0,
     // Pool linkage — index of next free slot (or null sentinel)
     pool_index: u32 = 0,
+    // File descriptor — stored for keep-alive timeout sweeps
+    fd: i32 = -1,
+    // Keep-alive: timestamp of last activity (monotonic clock, seconds)
+    last_active: i64 = 0,
 
     pub fn init(alloc: std.mem.Allocator) ConnState {
         return .{ .write_list = std.ArrayList(u8).init(alloc) };
+    }
+
+    /// Touch — update last activity timestamp.
+    pub fn touch(self: *ConnState) void {
+        const ts = std.posix.clock_gettime(.MONOTONIC) catch return;
+        self.last_active = ts.sec;
     }
 
     pub fn reset(self: *ConnState) void {
         self.read_len = 0;
         self.write_list.clearRetainingCapacity();
         self.write_off = 0;
+        self.fd = -1;
+        self.last_active = 0;
     }
 
     pub fn deinit(self: *ConnState) void {

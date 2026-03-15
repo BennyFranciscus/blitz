@@ -11,6 +11,7 @@ const static_mod = @import("static.zig");
 const query_mod = @import("query.zig");
 const pool_mod = @import("pool.zig");
 const body_mod = @import("body.zig");
+const cookie_mod = @import("cookie.zig");
 
 const Method = types.Method;
 const StatusCode = types.StatusCode;
@@ -1716,4 +1717,242 @@ test "Router staticDir with cache control" {
     router.handle(&req, &res);
     try testing.expectEqual(StatusCode.ok, res.status);
     try testing.expectEqualStrings("public, max-age=31536000", res.headers.get("Cache-Control").?);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Cookie parsing tests
+// ════════════════════════════════════════════════════════════════════
+
+test "parseCookies single cookie" {
+    const jar = cookie_mod.parseCookies("session=abc123");
+    try testing.expectEqual(@as(usize, 1), jar.len);
+    try testing.expectEqualStrings("abc123", jar.get("session").?);
+}
+
+test "parseCookies multiple cookies" {
+    const jar = cookie_mod.parseCookies("session=abc123; theme=dark; lang=en");
+    try testing.expectEqual(@as(usize, 3), jar.len);
+    try testing.expectEqualStrings("abc123", jar.get("session").?);
+    try testing.expectEqualStrings("dark", jar.get("theme").?);
+    try testing.expectEqualStrings("en", jar.get("lang").?);
+}
+
+test "parseCookies with spaces" {
+    const jar = cookie_mod.parseCookies("  a=1;  b=2  ;c=3");
+    try testing.expectEqual(@as(usize, 3), jar.len);
+    try testing.expectEqualStrings("1", jar.get("a").?);
+    try testing.expectEqualStrings("2", jar.get("b").?);
+    try testing.expectEqualStrings("3", jar.get("c").?);
+}
+
+test "parseCookies empty value" {
+    const jar = cookie_mod.parseCookies("token=; name=Bob");
+    try testing.expectEqual(@as(usize, 2), jar.len);
+    try testing.expectEqualStrings("", jar.get("token").?);
+    try testing.expectEqualStrings("Bob", jar.get("name").?);
+}
+
+test "parseCookies no equals sign skipped" {
+    const jar = cookie_mod.parseCookies("valid=yes; malformed; also=ok");
+    try testing.expectEqual(@as(usize, 2), jar.len);
+    try testing.expectEqualStrings("yes", jar.get("valid").?);
+    try testing.expectEqualStrings("ok", jar.get("also").?);
+}
+
+test "parseCookies has() method" {
+    const jar = cookie_mod.parseCookies("a=1; b=2");
+    try testing.expect(jar.has("a"));
+    try testing.expect(jar.has("b"));
+    try testing.expect(!jar.has("c"));
+}
+
+test "parseCookies iterator" {
+    const jar = cookie_mod.parseCookies("x=1; y=2; z=3");
+    var it = jar.iterator();
+    var count: usize = 0;
+    while (it.next()) |_| count += 1;
+    try testing.expectEqual(@as(usize, 3), count);
+}
+
+test "parseCookies empty string" {
+    const jar = cookie_mod.parseCookies("");
+    try testing.expectEqual(@as(usize, 0), jar.len);
+}
+
+test "parseCookies value with equals sign" {
+    // Cookie values can contain = (e.g., base64 encoded)
+    const jar = cookie_mod.parseCookies("token=abc=def==");
+    try testing.expectEqual(@as(usize, 1), jar.len);
+    try testing.expectEqualStrings("abc=def==", jar.get("token").?);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Set-Cookie builder tests
+// ════════════════════════════════════════════════════════════════════
+
+test "buildSetCookie basic" {
+    var buf: [256]u8 = undefined;
+    const result = cookie_mod.buildSetCookie(&buf, "session", "abc123", .{});
+    try testing.expect(result != null);
+    try testing.expectEqualStrings("session=abc123", result.?);
+}
+
+test "buildSetCookie with all options" {
+    var buf: [256]u8 = undefined;
+    const result = cookie_mod.buildSetCookie(&buf, "id", "42", .{
+        .max_age = 3600,
+        .path = "/",
+        .domain = "example.com",
+        .secure = true,
+        .http_only = true,
+        .same_site = .strict,
+    });
+    try testing.expect(result != null);
+    const s = result.?;
+    try testing.expect(mem.indexOf(u8, s, "id=42") != null);
+    try testing.expect(mem.indexOf(u8, s, "Max-Age=3600") != null);
+    try testing.expect(mem.indexOf(u8, s, "Path=/") != null);
+    try testing.expect(mem.indexOf(u8, s, "Domain=example.com") != null);
+    try testing.expect(mem.indexOf(u8, s, "Secure") != null);
+    try testing.expect(mem.indexOf(u8, s, "HttpOnly") != null);
+    try testing.expect(mem.indexOf(u8, s, "SameSite=Strict") != null);
+}
+
+test "buildSetCookie buffer too small" {
+    var buf: [5]u8 = undefined;
+    const result = cookie_mod.buildSetCookie(&buf, "session", "abc123", .{});
+    try testing.expect(result == null);
+}
+
+test "buildDeleteCookie sets Max-Age=0" {
+    var buf: [256]u8 = undefined;
+    const result = cookie_mod.buildDeleteCookie(&buf, "session", .{ .path = "/" });
+    try testing.expect(result != null);
+    const s = result.?;
+    try testing.expect(mem.indexOf(u8, s, "session=") != null);
+    try testing.expect(mem.indexOf(u8, s, "Max-Age=0") != null);
+    try testing.expect(mem.indexOf(u8, s, "Path=/") != null);
+}
+
+test "buildSetCookie SameSite variants" {
+    var buf: [256]u8 = undefined;
+    const lax = cookie_mod.buildSetCookie(&buf, "a", "1", .{ .same_site = .lax }).?;
+    try testing.expect(mem.indexOf(u8, lax, "SameSite=Lax") != null);
+
+    const none = cookie_mod.buildSetCookie(&buf, "a", "1", .{ .same_site = .none }).?;
+    try testing.expect(mem.indexOf(u8, none, "SameSite=None") != null);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Request cookie integration tests
+// ════════════════════════════════════════════════════════════════════
+
+test "Request.cookies() parses Cookie header" {
+    var req = Request{
+        .method = .GET,
+        .path = "/",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    req.headers.set("Cookie", "session=abc; theme=dark");
+
+    const jar = req.cookies();
+    try testing.expectEqual(@as(usize, 2), jar.len);
+    try testing.expectEqualStrings("abc", jar.get("session").?);
+    try testing.expectEqualStrings("dark", jar.get("theme").?);
+}
+
+test "Request.cookie() convenience method" {
+    var req = Request{
+        .method = .GET,
+        .path = "/",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    req.headers.set("Cookie", "token=xyz789");
+
+    try testing.expectEqualStrings("xyz789", req.cookie("token").?);
+    try testing.expect(req.cookie("missing") == null);
+}
+
+test "Request.cookies() no Cookie header" {
+    const req = Request{
+        .method = .GET,
+        .path = "/",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    const jar = req.cookies();
+    try testing.expectEqual(@as(usize, 0), jar.len);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Response cookie and redirect tests
+// ════════════════════════════════════════════════════════════════════
+
+test "Response.setCookie adds Set-Cookie header" {
+    var res = Response{};
+    var buf: [256]u8 = undefined;
+    _ = res.setCookie(&buf, "session", "abc", .{ .http_only = true, .path = "/" });
+    const header = res.headers.get("Set-Cookie").?;
+    try testing.expect(mem.indexOf(u8, header, "session=abc") != null);
+    try testing.expect(mem.indexOf(u8, header, "HttpOnly") != null);
+}
+
+test "Response.deleteCookie adds deletion cookie" {
+    var res = Response{};
+    var buf: [256]u8 = undefined;
+    _ = res.deleteCookie(&buf, "session", .{ .path = "/" });
+    const header = res.headers.get("Set-Cookie").?;
+    try testing.expect(mem.indexOf(u8, header, "Max-Age=0") != null);
+}
+
+test "Response.redirect sets location and status" {
+    var res = Response{};
+    _ = res.redirect("/login", .found);
+    try testing.expectEqual(StatusCode.found, res.status);
+    try testing.expectEqualStrings("/login", res.headers.get("Location").?);
+    try testing.expectEqualStrings("", res.body.?);
+}
+
+test "Response.redirectTemp uses 302" {
+    var res = Response{};
+    _ = res.redirectTemp("/home");
+    try testing.expectEqual(StatusCode.found, res.status);
+    try testing.expectEqualStrings("/home", res.headers.get("Location").?);
+}
+
+test "Response.redirectPerm uses 301" {
+    var res = Response{};
+    _ = res.redirectPerm("/new-url");
+    try testing.expectEqual(StatusCode.moved_permanently, res.status);
+    try testing.expectEqualStrings("/new-url", res.headers.get("Location").?);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// ConnState keep-alive tests
+// ════════════════════════════════════════════════════════════════════
+
+test "ConnState.touch updates last_active" {
+    var st = pool_mod.ConnState.init(std.heap.page_allocator);
+    defer st.deinit();
+    try testing.expectEqual(@as(i64, 0), st.last_active);
+    st.touch();
+    try testing.expect(st.last_active > 0);
+}
+
+test "ConnState.reset clears fd and last_active" {
+    var st = pool_mod.ConnState.init(std.heap.page_allocator);
+    defer st.deinit();
+    st.fd = 42;
+    st.touch();
+    st.reset();
+    try testing.expectEqual(@as(i32, -1), st.fd);
+    try testing.expectEqual(@as(i64, 0), st.last_active);
 }

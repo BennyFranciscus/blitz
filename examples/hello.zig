@@ -106,6 +106,44 @@ fn createUser(req: *blitz.Request, res: *blitz.Response) void {
     _ = res.setStatus(.created).json("{\"id\":3,\"created\":true}");
 }
 
+fn login(_: *blitz.Request, res: *blitz.Response) void {
+    // Set a session cookie with security options
+    var cookie_buf: [256]u8 = undefined;
+    _ = res.setCookie(&cookie_buf, "session", "tok_abc123", .{
+        .max_age = 86400, // 24 hours
+        .path = "/",
+        .http_only = true,
+        .same_site = .lax,
+    });
+    _ = res.json("{\"logged_in\":true}");
+}
+
+fn logout(_: *blitz.Request, res: *blitz.Response) void {
+    // Delete the session cookie
+    var cookie_buf: [256]u8 = undefined;
+    _ = res.deleteCookie(&cookie_buf, "session", .{ .path = "/" });
+    _ = res.json("{\"logged_out\":true}");
+}
+
+fn profile(req: *blitz.Request, res: *blitz.Response) void {
+    // Read a cookie from the request
+    const session = req.cookie("session") orelse {
+        _ = res.redirectTemp("/login");
+        return;
+    };
+    var buf: [256]u8 = undefined;
+    const body = blitz.Json.stringify(&buf, .{
+        .session = session,
+        .message = "Welcome back!",
+    }) orelse "{}";
+    _ = res.json(body);
+}
+
+fn oldPage(_: *blitz.Request, res: *blitz.Response) void {
+    // Permanent redirect — page has moved
+    _ = res.redirectPerm("/new-page");
+}
+
 pub fn main() !void {
     var router = blitz.Router.init(std.heap.c_allocator);
 
@@ -132,6 +170,12 @@ pub fn main() !void {
     router.staticDir("/static", "./public", .{
         .cache_control = "public, max-age=3600",
     });
+
+    // Cookie & redirect routes
+    api.post("/login", login);
+    api.post("/logout", logout);
+    api.get("/profile", profile);
+    router.get("/old-page", oldPage);
 
     // JSON 404 handler
     router.notFound(blitz.jsonNotFoundHandler);

@@ -40,6 +40,7 @@ pub const static_mod = @import("blitz/static.zig");
 pub const query_mod = @import("blitz/query.zig");
 pub const pool_mod = @import("blitz/pool.zig");
 pub const body_mod = @import("blitz/body.zig");
+pub const cookie_mod = @import("blitz/cookie.zig");
 
 // Re-export main types for convenience
 pub const Request = types.Request;
@@ -95,6 +96,15 @@ pub const parseMultipart = body_mod.parseMultipart;
 pub const ConnPool = pool_mod.ConnPool;
 pub const ConnState = pool_mod.ConnState;
 
+// Cookies
+pub const CookieJar = cookie_mod.CookieJar;
+pub const Cookie = cookie_mod.Cookie;
+pub const parseCookies = cookie_mod.parseCookies;
+pub const SetCookieOpts = cookie_mod.SetCookieOpts;
+pub const SameSite = cookie_mod.SameSite;
+pub const buildSetCookie = cookie_mod.buildSetCookie;
+pub const buildDeleteCookie = cookie_mod.buildDeleteCookie;
+
 // Utilities
 pub const writeUsize = types.writeUsize;
 pub const writeI64 = types.writeI64;
@@ -110,4 +120,5 @@ test {
     _ = @import("blitz/query.zig");
     _ = @import("blitz/pool.zig");
     _ = @import("blitz/body.zig");
+    _ = @import("blitz/cookie.zig");
 }

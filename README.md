@@ -16,6 +16,9 @@ A blazing-fast HTTP/1.1 micro web framework for Zig.
 - **Query string parsing** — structured typed query params with URL decoding
 - **Connection pooling** — pre-allocated ConnState objects, zero malloc/free per connection
 - **Request body parsing** — URL-encoded forms and multipart/form-data with typed access
+- **Cookie support** — parse request cookies and set response cookies with full RFC 6265 options
+- **Redirect helpers** — `redirect`, `redirectTemp`, `redirectPerm` for clean navigation
+- **Keep-alive timeout** — automatic idle connection cleanup via timerfd
 - **Structured errors** — consistent JSON error responses out of the box
 - **Clean API** — define routes and handlers, blitz handles the rest
 
@@ -333,6 +336,74 @@ fn handler(req: *blitz.Request, res: *blitz.Response) void {
 }
 ```
 
+### Cookies
+
+Parse request cookies (zero-copy) and set response cookies with full RFC 6265 options.
+
+**Reading cookies:**
+
+```zig
+fn handler(req: *blitz.Request, res: *blitz.Response) void {
+    // Get a single cookie value
+    const session = req.cookie("session") orelse "none";
+    _ = session;
+
+    // Parse all cookies into a CookieJar
+    const jar = req.cookies();
+    if (jar.has("theme")) {
+        const theme = jar.get("theme").?;
+        _ = theme;
+    }
+
+    // Iterate all cookies
+    var it = jar.iterator();
+    while (it.next()) |c| {
+        // c.name, c.value
+        _ = c;
+    }
+
+    _ = res.text("ok");
+}
+```
+
+**Setting cookies:**
+
+```zig
+fn login(_: *blitz.Request, res: *blitz.Response) void {
+    var buf: [256]u8 = undefined;
+    _ = res.setCookie(&buf, "session", "tok_abc123", .{
+        .max_age = 86400,       // 24 hours
+        .path = "/",
+        .domain = "example.com",
+        .secure = true,
+        .http_only = true,
+        .same_site = .lax,      // .strict, .lax, or .none
+    });
+    _ = res.json("{\"ok\":true}");
+}
+
+fn logout(_: *blitz.Request, res: *blitz.Response) void {
+    var buf: [256]u8 = undefined;
+    _ = res.deleteCookie(&buf, "session", .{ .path = "/" });
+    _ = res.json("{\"logged_out\":true}");
+}
+```
+
+### Redirects
+
+```zig
+fn handler(_: *blitz.Request, res: *blitz.Response) void {
+    // Temporary redirect (302)
+    _ = res.redirectTemp("/login");
+
+    // Permanent redirect (301)
+    _ = res.redirectPerm("/new-url");
+
+    // Custom status redirect
+    _ = res.redirect("/other", .found);
+}
+```
+
 ### Static File Serving
 
 Serve files from disk with automatic MIME type detection, directory traversal protection, and optional cache control.
@@ -394,6 +465,7 @@ router.notFound(blitz.jsonNotFoundHandler);
 var server = blitz.Server.init(&router, .{
     .port = 8080,
     .threads = null, // auto-detect CPU count
+    .keep_alive_timeout = 60, // seconds (0 = disable)
 });
 try server.listen();
 ```
@@ -412,9 +484,10 @@ src/
 │   ├── query.zig      # Query string parser with URL decoding and typed access
 │   ├── json.zig       # Comptime JSON serializer (Json, JsonObject, JsonArray)
 │   ├── body.zig       # Request body parsing (URL-encoded forms, multipart/form-data)
+│   ├── cookie.zig     # Cookie parsing and Set-Cookie builder (RFC 6265)
 │   ├── errors.zig     # Structured error responses (sendError, badRequest, etc.)
 │   ├── static.zig     # Static file serving (MIME detection, path security, file reading)
-│   └── tests.zig      # Unit tests for all modules (130 tests)
+│   └── tests.zig      # Unit tests for all modules (155 tests)
 ├── main.zig           # HttpArena benchmark entry point
 examples/
 └── hello.zig          # Example app with all features
@@ -433,6 +506,8 @@ examples/
 - **Static file serving** — MIME detection, path sanitization, and file reading with configurable cache headers
 - **Connection pool** — pre-allocated ConnState per worker thread, O(1) acquire/release, fallback to heap when exhausted
 - **Query parsing** — structured Query type with getInt/getBool/getAll/getDecode, zero-copy raw access or URL-decoded
+- **Cookie support** — zero-copy request cookie parsing, Set-Cookie builder with Max-Age/Path/Domain/Secure/HttpOnly/SameSite
+- **Keep-alive timeout** — timerfd-based idle connection sweep, configurable timeout per server
 
 ## Building
 

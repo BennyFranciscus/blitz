@@ -6,6 +6,8 @@ const body_mod = @import("body.zig");
 const FormData = body_mod.FormData;
 const ContentType = body_mod.ContentType;
 const MultipartResult = body_mod.MultipartResult;
+const cookie_mod = @import("cookie.zig");
+const CookieJar = cookie_mod.CookieJar;
 
 // ── HTTP Method ─────────────────────────────────────────────────────
 pub const Method = enum {
@@ -193,6 +195,20 @@ pub const Request = struct {
         const b = self.body orelse return null;
         return body_mod.parseMultipart(b, boundary);
     }
+
+    /// Parse the Cookie header into a CookieJar.
+    /// Returns an empty jar if no Cookie header is present.
+    pub fn cookies(self: *const Request) CookieJar {
+        const header = self.headers.get("Cookie") orelse return CookieJar{};
+        return cookie_mod.parseCookies(header);
+    }
+
+    /// Get a single cookie value by name (convenience shortcut).
+    pub fn cookie(self: *const Request, name: []const u8) ?[]const u8 {
+        const header = self.headers.get("Cookie") orelse return null;
+        const jar = cookie_mod.parseCookies(header);
+        return jar.get(name);
+    }
 };
 
 // ── Response ────────────────────────────────────────────────────────
@@ -234,6 +250,42 @@ pub const Response = struct {
     pub fn rawResponse(self: *Response, data: []const u8) *Response {
         self.raw = data;
         return self;
+    }
+
+    /// Set a cookie on the response.
+    /// Builds the Set-Cookie header value into the provided buffer.
+    /// Multiple cookies use multiple Set-Cookie headers (per RFC 6265).
+    pub fn setCookie(self: *Response, buf: []u8, name: []const u8, value: []const u8, opts: cookie_mod.SetCookieOpts) *Response {
+        if (cookie_mod.buildSetCookie(buf, name, value, opts)) |cookie_str| {
+            self.headers.append("Set-Cookie", cookie_str);
+        }
+        return self;
+    }
+
+    /// Delete a cookie by setting Max-Age=0.
+    pub fn deleteCookie(self: *Response, buf: []u8, name: []const u8, opts: cookie_mod.SetCookieOpts) *Response {
+        if (cookie_mod.buildDeleteCookie(buf, name, opts)) |cookie_str| {
+            self.headers.append("Set-Cookie", cookie_str);
+        }
+        return self;
+    }
+
+    /// Send a redirect response.
+    pub fn redirect(self: *Response, location: []const u8, status: StatusCode) *Response {
+        self.status = status;
+        self.headers.set("Location", location);
+        self.body = "";
+        return self;
+    }
+
+    /// Temporary redirect (302 Found).
+    pub fn redirectTemp(self: *Response, location: []const u8) *Response {
+        return self.redirect(location, .found);
+    }
+
+    /// Permanent redirect (301 Moved Permanently).
+    pub fn redirectPerm(self: *Response, location: []const u8) *Response {
+        return self.redirect(location, .moved_permanently);
     }
 
     /// Serialize response to writer
