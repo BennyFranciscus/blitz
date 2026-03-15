@@ -1,0 +1,17 @@
+{
+  "display_name": "blitz",
+  "language": "Zig",
+  "type": "engine",
+  "engine": "epoll",
+  "description": "Custom Zig HTTP server built on epoll with SO_REUSEPORT multi-threading. Zero allocations in the hot path, pre-computed responses, pipeline batching.",
+  "repo": "https://github.com/BennyFranciscus/blitz",
+  "enabled": true,
+  "tests": [
+    "baseline",
+    "pipelined",
+    "noisy",
+    "limited-conn",
+    "json",
+    "upload"
+  ]
+}

@@ -1,0 +1,10 @@
+.{
+    .name = .blitz,
+    .version = "0.1.0",
+    .fingerprint = 0xe8a54ff4e60f9038,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
