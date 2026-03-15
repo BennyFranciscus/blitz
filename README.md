@@ -13,6 +13,8 @@ A blazing-fast HTTP/1.1 micro web framework for Zig.
 - **Route groups** — organize routes under shared prefixes
 - **JSON builder** — comptime-powered zero-allocation JSON serialization
 - **Static file serving** — serve files from disk with MIME detection, path traversal protection, and cache control
+- **Query string parsing** — structured typed query params with URL decoding
+- **Connection pooling** — pre-allocated ConnState objects, zero malloc/free per connection
 - **Structured errors** — consistent JSON error responses out of the box
 - **Clean API** — define routes and handlers, blitz handles the rest
 
@@ -116,8 +118,20 @@ fn handler(req: *blitz.Request, res: *blitz.Response) void {
     // Path parameters
     const id = req.params.get("id") orelse "unknown";
 
-    // Query parameters
+    // Simple query parameter lookup (zero-copy)
     const page = req.queryParam("page") orelse "1";
+
+    // Structured query parsing with typed access
+    const q = req.queryParsed();
+    const limit = q.getInt("limit", i64) orelse 20;
+    const asc = q.getBool("asc") orelse true;
+    _ = limit;
+    _ = asc;
+
+    // URL-decoded query param
+    var decode_buf: [256]u8 = undefined;
+    const search = q.getDecode("q", &decode_buf);
+    _ = search;
 
     // Headers
     const ct = req.headers.get("Content-Type");
@@ -184,6 +198,53 @@ const list = arr.finish() orelse "[]";
 
 // Supports: structs, slices, ints, floats, bools, strings,
 //           optionals (null fields skipped), enums (as strings)
+```
+
+### Query String Parsing
+
+Structured query string parsing with typed access, URL decoding, multi-value support, and iteration.
+
+```zig
+fn search(req: *blitz.Request, res: *blitz.Response) void {
+    const q = req.queryParsed(); // GET /search?q=hello+world&page=2&debug
+
+    // Simple string lookup (raw, no decoding)
+    const term = q.get("q");                          // "hello+world"
+
+    // URL-decoded value
+    var buf: [256]u8 = undefined;
+    const decoded = q.getDecode("q", &buf);           // "hello world"
+    _ = decoded;
+
+    // Typed access
+    const page = q.getInt("page", i64) orelse 1;      // 2
+    const debug = q.getBool("debug") orelse false;     // false (key exists but no value)
+    _ = page;
+    _ = debug;
+
+    // Check key existence (even without value)
+    if (q.has("debug")) { ... }
+
+    // Multi-value params: /search?tag=zig&tag=http&tag=fast
+    var tags: [8][]const u8 = undefined;
+    const n = q.getAll("tag", &tags);                  // n=3
+    _ = n;
+
+    // Iterate all params
+    var it = q.iterator();
+    while (it.next()) |param| {
+        // param.key, param.value
+        _ = param;
+    }
+
+    _ = res.json("{\"ok\":true}");
+}
+```
+
+**URL decoding** is also available standalone:
+```zig
+var buf: [256]u8 = undefined;
+const decoded = blitz.urlDecode(&buf, "hello%20world+foo"); // "hello world foo"
 ```
 
 ### Static File Serving
@@ -261,10 +322,12 @@ src/
 │   ├── router.zig     # Radix-trie router with middleware, groups, params & wildcards
 │   ├── parser.zig     # Zero-copy HTTP/1.1 request parser
 │   ├── server.zig     # Epoll event loop, connection management
+│   ├── pool.zig       # Connection pool — pre-allocated ConnState objects
+│   ├── query.zig      # Query string parser with URL decoding and typed access
 │   ├── json.zig       # Comptime JSON serializer (Json, JsonObject, JsonArray)
 │   ├── errors.zig     # Structured error responses (sendError, badRequest, etc.)
 │   ├── static.zig     # Static file serving (MIME detection, path security, file reading)
-│   └── tests.zig      # Unit tests for all modules
+│   └── tests.zig      # Unit tests for all modules (111 tests)
 ├── main.zig           # HttpArena benchmark entry point
 examples/
 └── hello.zig          # Example app with all features
@@ -281,6 +344,8 @@ examples/
 - **Route groups** — prefix concatenation at init time, zero runtime overhead
 - **Comptime JSON** — Zig's comptime introspects struct fields at compile time, no reflection cost at runtime
 - **Static file serving** — MIME detection, path sanitization, and file reading with configurable cache headers
+- **Connection pool** — pre-allocated ConnState per worker thread, O(1) acquire/release, fallback to heap when exhausted
+- **Query parsing** — structured Query type with getInt/getBool/getAll/getDecode, zero-copy raw access or URL-decoded
 
 ## Building
 

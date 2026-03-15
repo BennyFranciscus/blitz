@@ -7,6 +7,9 @@ const Thread = std.Thread;
 const types = @import("types.zig");
 const parser = @import("parser.zig");
 const Router = @import("router.zig").Router;
+const pool_mod = @import("pool.zig");
+const ConnPool = pool_mod.ConnPool;
+const ConnState = pool_mod.ConnState;
 const Request = types.Request;
 const Response = types.Response;
 
@@ -22,21 +25,6 @@ const SO_REUSEPORT: u32 = 15;
 const SO_REUSEADDR: u32 = 2;
 const IPPROTO_TCP: i32 = 6;
 const TCP_NODELAY: u32 = 1;
-
-// ── Per-connection state ────────────────────────────────────────────
-const ConnState = struct {
-    read_buf: [BUF_SIZE]u8 = undefined,
-    read_len: usize = 0,
-    write_list: std.ArrayList(u8),
-    write_off: usize = 0,
-
-    fn init(alloc: std.mem.Allocator) ConnState {
-        return .{ .write_list = std.ArrayList(u8).init(alloc) };
-    }
-    fn deinit(self: *ConnState) void {
-        self.write_list.deinit();
-    }
-};
 
 // ── Server Configuration ────────────────────────────────────────────
 pub const Config = struct {
@@ -69,8 +57,15 @@ pub const Server = struct {
     }
 };
 
+// Default pool size per worker thread (covers most concurrent connections)
+const POOL_SIZE: usize = 4096;
+
 fn workerThread(router: *Router, port: u16) void {
     const alloc = std.heap.c_allocator;
+
+    // Initialize connection pool for this worker
+    var pool = ConnPool.init(alloc, POOL_SIZE) catch return;
+    _ = &pool;
 
     const sock: i32 = @intCast(posix.socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0) catch return);
     defer posix.close(sock);
@@ -99,7 +94,7 @@ fn workerThread(router: *Router, port: u16) void {
             const fd = ev.data.fd;
 
             if (fd == sock) {
-                acceptLoop(alloc, sock, epfd, &conns);
+                acceptLoop(&pool, sock, epfd, &conns);
                 continue;
             }
 
@@ -158,7 +153,7 @@ fn workerThread(router: *Router, port: u16) void {
                 }
 
                 if (should_close and st.write_off >= st.write_list.items.len) {
-                    closeConn(alloc, &conns, epfd, fd, uidx);
+                    closeConn(&pool, &conns, epfd, fd, uidx);
                     continue;
                 }
             }
@@ -167,7 +162,7 @@ fn workerThread(router: *Router, port: u16) void {
                 if (conns[uidx]) |s| {
                     if (s.write_list.items.len > s.write_off) {
                         const w = posix.write(fd, s.write_list.items[s.write_off..]) catch {
-                            closeConn(alloc, &conns, epfd, fd, uidx);
+                            closeConn(&pool, &conns, epfd, fd, uidx);
                             continue;
                         };
                         s.write_off += w;
@@ -182,13 +177,13 @@ fn workerThread(router: *Router, port: u16) void {
             }
 
             if (ev.events & (linux.EPOLL.ERR | linux.EPOLL.HUP) != 0) {
-                closeConn(alloc, &conns, epfd, fd, uidx);
+                closeConn(&pool, &conns, epfd, fd, uidx);
             }
         }
     }
 }
 
-fn acceptLoop(alloc: std.mem.Allocator, sock: i32, epfd: i32, conns: *[MAX_CONNS]?*ConnState) void {
+fn acceptLoop(pool: *ConnPool, sock: i32, epfd: i32, conns: *[MAX_CONNS]?*ConnState) void {
     while (true) {
         var caddr: posix.sockaddr = undefined;
         var clen: posix.socklen_t = @sizeOf(posix.sockaddr);
@@ -202,28 +197,25 @@ fn acceptLoop(alloc: std.mem.Allocator, sock: i32, epfd: i32, conns: *[MAX_CONNS
             continue;
         }
 
-        const st = alloc.create(ConnState) catch {
+        const st = pool.acquire() orelse {
             posix.close(cfd);
             continue;
         };
-        st.* = ConnState.init(alloc);
         conns[uidx] = st;
 
         var cev = linux.epoll_event{ .events = linux.EPOLL.IN | linux.EPOLL.ET, .data = .{ .fd = cfd_i } };
         posix.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, cfd_i, &cev) catch {
-            st.deinit();
-            alloc.destroy(st);
+            pool.release(st);
             conns[uidx] = null;
             posix.close(cfd);
         };
     }
 }
 
-fn closeConn(alloc: std.mem.Allocator, conns: *[MAX_CONNS]?*ConnState, epfd: i32, fd: i32, uidx: usize) void {
+fn closeConn(pool: *ConnPool, conns: *[MAX_CONNS]?*ConnState, epfd: i32, fd: i32, uidx: usize) void {
     posix.epoll_ctl(epfd, linux.EPOLL.CTL_DEL, fd, null) catch {};
     if (conns[uidx]) |s| {
-        s.deinit();
-        alloc.destroy(s);
+        pool.release(s);
         conns[uidx] = null;
     }
     posix.close(fd);

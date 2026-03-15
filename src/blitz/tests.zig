@@ -8,6 +8,8 @@ const parser_mod = @import("parser.zig");
 const json_mod = @import("json.zig");
 const errors_mod = @import("errors.zig");
 const static_mod = @import("static.zig");
+const query_mod = @import("query.zig");
+const pool_mod = @import("pool.zig");
 
 const Method = types.Method;
 const StatusCode = types.StatusCode;
@@ -962,6 +964,304 @@ test "Router staticDir only serves GET and HEAD" {
     var res = Response{};
     router.handle(&req, &res);
     try testing.expectEqual(StatusCode.not_found, res.status);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Query string parser tests
+// ════════════════════════════════════════════════════════════════════
+
+const Query = query_mod.Query;
+
+test "Query.parse basic key=value pairs" {
+    const q = Query.parse("name=Alice&age=30&city=NYC");
+    try testing.expectEqual(@as(usize, 3), q.len);
+    try testing.expectEqualStrings("Alice", q.get("name").?);
+    try testing.expectEqualStrings("30", q.get("age").?);
+    try testing.expectEqualStrings("NYC", q.get("city").?);
+    try testing.expect(q.get("missing") == null);
+}
+
+test "Query.parse empty string" {
+    const q = Query.parse("");
+    try testing.expectEqual(@as(usize, 0), q.len);
+}
+
+test "Query.parse key without value" {
+    const q = Query.parse("debug&verbose&name=Bob");
+    try testing.expectEqual(@as(usize, 3), q.len);
+    try testing.expectEqualStrings("", q.get("debug").?);
+    try testing.expectEqualStrings("Bob", q.get("name").?);
+    try testing.expect(q.has("debug"));
+    try testing.expect(q.has("verbose"));
+}
+
+test "Query.parse empty values" {
+    const q = Query.parse("key=&other=val");
+    try testing.expectEqualStrings("", q.get("key").?);
+    try testing.expectEqualStrings("val", q.get("other").?);
+}
+
+test "Query.parse value with equals sign" {
+    const q = Query.parse("expr=a=b&x=1");
+    // Value should be "a=b" — only split on first '='
+    // Actually our parser splits on first '=', so value is everything after
+    try testing.expectEqualStrings("a=b", q.get("expr").?);
+}
+
+test "Query.parse skips empty pairs" {
+    const q = Query.parse("a=1&&b=2&");
+    try testing.expectEqual(@as(usize, 2), q.len);
+    try testing.expectEqualStrings("1", q.get("a").?);
+    try testing.expectEqualStrings("2", q.get("b").?);
+}
+
+test "Query.getInt returns typed integer" {
+    const q = Query.parse("page=5&limit=100&bad=abc");
+    try testing.expectEqual(@as(?i64, 5), q.getInt("page", i64));
+    try testing.expectEqual(@as(?i64, 100), q.getInt("limit", i64));
+    try testing.expect(q.getInt("bad", i64) == null);
+    try testing.expect(q.getInt("missing", i64) == null);
+}
+
+test "Query.getInt with u32" {
+    const q = Query.parse("port=8080");
+    try testing.expectEqual(@as(?u32, 8080), q.getInt("port", u32));
+}
+
+test "Query.getBool parses boolean values" {
+    const q = Query.parse("a=true&b=false&c=1&d=0&e=yes&f=no&g=maybe");
+    try testing.expectEqual(@as(?bool, true), q.getBool("a"));
+    try testing.expectEqual(@as(?bool, false), q.getBool("b"));
+    try testing.expectEqual(@as(?bool, true), q.getBool("c"));
+    try testing.expectEqual(@as(?bool, false), q.getBool("d"));
+    try testing.expectEqual(@as(?bool, true), q.getBool("e"));
+    try testing.expectEqual(@as(?bool, false), q.getBool("f"));
+    try testing.expect(q.getBool("g") == null); // "maybe" is not a bool
+    try testing.expect(q.getBool("missing") == null);
+}
+
+test "Query.has checks key existence" {
+    const q = Query.parse("flag&name=Bob");
+    try testing.expect(q.has("flag"));
+    try testing.expect(q.has("name"));
+    try testing.expect(!q.has("missing"));
+}
+
+test "Query.getAll returns multiple values" {
+    const q = Query.parse("tag=zig&tag=http&tag=fast&name=blitz");
+    var vals: [4][]const u8 = undefined;
+    const n = q.getAll("tag", &vals);
+    try testing.expectEqual(@as(usize, 3), n);
+    try testing.expectEqualStrings("zig", vals[0]);
+    try testing.expectEqualStrings("http", vals[1]);
+    try testing.expectEqualStrings("fast", vals[2]);
+}
+
+test "Query.iterator iterates all params" {
+    const q = Query.parse("a=1&b=2&c=3");
+    var it = q.iterator();
+    const p1 = it.next().?;
+    try testing.expectEqualStrings("a", p1.key);
+    try testing.expectEqualStrings("1", p1.value);
+    const p2 = it.next().?;
+    try testing.expectEqualStrings("b", p2.key);
+    const p3 = it.next().?;
+    try testing.expectEqualStrings("c", p3.key);
+    try testing.expect(it.next() == null);
+}
+
+test "Query.count returns param count" {
+    const q = Query.parse("a=1&b=2&c=3");
+    try testing.expectEqual(@as(usize, 3), q.paramCount());
+}
+
+test "Query.getDecode decodes URL-encoded value" {
+    const q = Query.parse("name=hello%20world&path=a%2Fb");
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("hello world", q.getDecode("name", &buf).?);
+    try testing.expectEqualStrings("a/b", q.getDecode("path", &buf).?);
+    try testing.expect(q.getDecode("missing", &buf) == null);
+}
+
+// ── URL decoding tests ──────────────────────────────────────────────
+
+test "urlDecode plain string" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("hello", query_mod.urlDecode(&buf, "hello").?);
+}
+
+test "urlDecode plus as space" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("hello world", query_mod.urlDecode(&buf, "hello+world").?);
+}
+
+test "urlDecode percent encoding" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("hello world", query_mod.urlDecode(&buf, "hello%20world").?);
+    try testing.expectEqualStrings("/path/to", query_mod.urlDecode(&buf, "%2Fpath%2Fto").?);
+    try testing.expectEqualStrings("a&b=c", query_mod.urlDecode(&buf, "a%26b%3Dc").?);
+}
+
+test "urlDecode mixed encoding" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("foo bar&baz", query_mod.urlDecode(&buf, "foo+bar%26baz").?);
+}
+
+test "urlDecode uppercase hex" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings(" ", query_mod.urlDecode(&buf, "%20").?);
+    try testing.expectEqualStrings(" ", query_mod.urlDecode(&buf, "%20").?);
+}
+
+test "urlDecode lowercase hex" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("/", query_mod.urlDecode(&buf, "%2f").?);
+}
+
+test "urlDecode truncated percent returns null" {
+    var buf: [256]u8 = undefined;
+    try testing.expect(query_mod.urlDecode(&buf, "abc%2") == null);
+    try testing.expect(query_mod.urlDecode(&buf, "abc%") == null);
+}
+
+test "urlDecode invalid hex returns null" {
+    var buf: [256]u8 = undefined;
+    try testing.expect(query_mod.urlDecode(&buf, "%GG") == null);
+    try testing.expect(query_mod.urlDecode(&buf, "%ZZ") == null);
+}
+
+test "urlDecode buffer overflow returns null" {
+    var buf: [3]u8 = undefined;
+    try testing.expect(query_mod.urlDecode(&buf, "abcd") == null);
+    try testing.expectEqualStrings("abc", query_mod.urlDecode(&buf, "abc").?);
+}
+
+test "urlDecode empty string" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("", query_mod.urlDecode(&buf, "").?);
+}
+
+// ── Request.queryParsed integration test ────────────────────────────
+
+test "Request.queryParsed returns structured Query" {
+    const req = Request{
+        .method = .GET,
+        .path = "/search",
+        .query = "q=hello+world&page=2&debug",
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    const q = req.queryParsed();
+    try testing.expectEqual(@as(usize, 3), q.paramCount());
+    try testing.expectEqualStrings("hello+world", q.get("q").?);
+    try testing.expectEqual(@as(?i64, 2), q.getInt("page", i64));
+    try testing.expect(q.has("debug"));
+
+    // URL-decode the query param
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("hello world", q.getDecode("q", &buf).?);
+}
+
+test "Request.queryParsed with no query returns empty" {
+    const req = Request{
+        .method = .GET,
+        .path = "/",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    const q = req.queryParsed();
+    try testing.expectEqual(@as(usize, 0), q.paramCount());
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Connection pool tests
+// ════════════════════════════════════════════════════════════════════
+
+const ConnPool = pool_mod.ConnPool;
+
+test "ConnPool acquire and release" {
+    var pool = try ConnPool.init(testing.allocator, 4);
+    defer pool.deinit();
+
+    const s1 = pool.acquire().?;
+    const s2 = pool.acquire().?;
+    try testing.expect(s1 != s2);
+    try testing.expectEqual(@as(usize, 2), pool.pool_hits);
+
+    pool.release(s1);
+    pool.release(s2);
+
+    // Re-acquire should get pooled objects back
+    const s3 = pool.acquire().?;
+    try testing.expect(s3 == s2 or s3 == s1); // LIFO — should get s2 back
+    pool.release(s3);
+}
+
+test "ConnPool exhaustion and fallback" {
+    var pool = try ConnPool.init(testing.allocator, 2);
+    defer pool.deinit();
+
+    const s1 = pool.acquire().?;
+    const s2 = pool.acquire().?;
+    // Pool is exhausted, next acquire falls back to heap
+    const s3 = pool.acquire().?;
+    try testing.expectEqual(@as(usize, 2), pool.pool_hits);
+    try testing.expectEqual(@as(usize, 1), pool.fallback_allocs);
+    try testing.expectEqual(std.math.maxInt(u32), s3.pool_index); // sentinel
+
+    // Release heap-allocated (should free it)
+    pool.release(s3);
+    pool.release(s2);
+    pool.release(s1);
+}
+
+test "ConnPool reset clears state" {
+    var pool = try ConnPool.init(testing.allocator, 2);
+    defer pool.deinit();
+
+    const s = pool.acquire().?;
+    s.read_len = 42;
+    try s.write_list.appendSlice("test data");
+    s.write_off = 5;
+
+    pool.release(s);
+    const s2 = pool.acquire().?;
+    try testing.expect(s == s2); // same slot
+    try testing.expectEqual(@as(usize, 0), s2.read_len);
+    try testing.expectEqual(@as(usize, 0), s2.write_off);
+    // write_list capacity retained but items cleared
+    try testing.expectEqual(@as(usize, 0), s2.write_list.items.len);
+    pool.release(s2);
+}
+
+test "ConnPool full cycle" {
+    var pool = try ConnPool.init(testing.allocator, 3);
+    defer pool.deinit();
+
+    // Acquire all 3
+    var slots: [3]*pool_mod.ConnState = undefined;
+    for (0..3) |i| {
+        slots[i] = pool.acquire().?;
+    }
+    try testing.expectEqual(@as(usize, 0), pool.free_top);
+
+    // Release all
+    for (0..3) |i| {
+        pool.release(slots[i]);
+    }
+    try testing.expectEqual(@as(usize, 3), pool.free_top);
+
+    // Acquire again — all from pool
+    for (0..3) |i| {
+        slots[i] = pool.acquire().?;
+    }
+    try testing.expectEqual(@as(usize, 6), pool.pool_hits); // 3 + 3
+    for (0..3) |i| {
+        pool.release(slots[i]);
+    }
 }
 
 test "Router staticDir with cache control" {

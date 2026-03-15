@@ -27,6 +27,22 @@ fn greet(req: *blitz.Request, res: *blitz.Response) void {
     _ = res.text(name);
 }
 
+fn search(req: *blitz.Request, res: *blitz.Response) void {
+    // Structured query string parsing with typed access
+    const q = req.queryParsed();
+    const term = q.get("q") orelse "nothing";
+    const page = q.getInt("page", i64) orelse 1;
+    const debug = q.getBool("debug") orelse false;
+
+    var buf: [512]u8 = undefined;
+    const body = blitz.Json.stringify(&buf, .{
+        .query = term,
+        .page = page,
+        .debug = debug,
+    }) orelse "{\"error\":\"serialize failed\"}";
+    _ = res.json(body);
+}
+
 fn health(_: *blitz.Request, res: *blitz.Response) void {
     // Using the JSON builder for zero-alloc JSON
     var buf: [256]u8 = undefined;
@@ -91,6 +107,7 @@ pub fn main() !void {
     // Top-level routes
     router.get("/", hello);
     router.get("/hello/:name", greet);
+    router.get("/search", search);
 
     // API route group
     const api = router.group("/api/v1");

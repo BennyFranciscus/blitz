@@ -1,5 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
+const query_mod = @import("query.zig");
+const Query = query_mod.Query;
 
 // ── HTTP Method ─────────────────────────────────────────────────────
 pub const Method = enum {
@@ -147,7 +149,7 @@ pub const Request = struct {
         }
     };
 
-    /// Parse query string parameter by name
+    /// Parse query string parameter by name (simple zero-copy lookup).
     pub fn queryParam(self: *const Request, name: []const u8) ?[]const u8 {
         const q = self.query orelse return null;
         var it = mem.splitScalar(u8, q, '&');
@@ -157,6 +159,13 @@ pub const Request = struct {
             }
         }
         return null;
+    }
+
+    /// Parse the full query string into a structured Query object.
+    /// Supports typed access (getInt, getBool), multi-value params, iteration, and URL decoding.
+    pub fn queryParsed(self: *const Request) Query {
+        const q = self.query orelse return Query{};
+        return Query.parse(q);
     }
 };
 

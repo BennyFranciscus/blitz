@@ -37,6 +37,8 @@ pub const server_mod = @import("blitz/server.zig");
 pub const json_mod = @import("blitz/json.zig");
 pub const errors_mod = @import("blitz/errors.zig");
 pub const static_mod = @import("blitz/static.zig");
+pub const query_mod = @import("blitz/query.zig");
+pub const pool_mod = @import("blitz/pool.zig");
 
 // Re-export main types for convenience
 pub const Request = types.Request;
@@ -74,6 +76,14 @@ pub const internalError = errors_mod.internalError;
 pub const jsonNotFoundHandler = errors_mod.jsonNotFoundHandler;
 pub const jsonMethodNotAllowedHandler = errors_mod.jsonMethodNotAllowedHandler;
 
+// Query string parsing
+pub const Query = query_mod.Query;
+pub const urlDecode = query_mod.urlDecode;
+
+// Connection pooling
+pub const ConnPool = pool_mod.ConnPool;
+pub const ConnState = pool_mod.ConnState;
+
 // Utilities
 pub const writeUsize = types.writeUsize;
 pub const writeI64 = types.writeI64;
@@ -86,4 +96,6 @@ pub const parse = parser_mod.parse;
 test {
     _ = @import("blitz/tests.zig");
     _ = @import("blitz/static.zig");
+    _ = @import("blitz/query.zig");
+    _ = @import("blitz/pool.zig");
 }
