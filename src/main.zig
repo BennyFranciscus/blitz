@@ -28,14 +28,14 @@ fn handleBaseline(req: *blitz.Request, res: *blitz.Response) void {
         }
     }
     var nb: [32]u8 = undefined;
-    _ = res.text(blitz.writeI64(&nb, sum));
+    _ = res.textBuf(blitz.writeI64(&nb, sum));
 }
 
 fn handleBaseline2(req: *blitz.Request, res: *blitz.Response) void {
     var sum: i64 = 0;
     if (req.query) |q| sum = parseQuerySum(q);
     var nb: [32]u8 = undefined;
-    _ = res.text(blitz.writeI64(&nb, sum));
+    _ = res.textBuf(blitz.writeI64(&nb, sum));
 }
 
 fn handleJson(_: *blitz.Request, res: *blitz.Response) void {
@@ -45,7 +45,7 @@ fn handleJson(_: *blitz.Request, res: *blitz.Response) void {
 fn handleUpload(req: *blitz.Request, res: *blitz.Response) void {
     if (req.body) |body| {
         var nb: [32]u8 = undefined;
-        _ = res.text(blitz.writeUsize(&nb, body.len));
+        _ = res.textBuf(blitz.writeUsize(&nb, body.len));
     } else {
         _ = res.text("0");
     }
@@ -277,6 +277,9 @@ pub fn main() !void {
     router.get("/static/*filepath", handleStatic);
 
     // Start server
-    var server = blitz.Server.init(&router, .{ .port = 8080 });
+    var server = blitz.Server.init(&router, .{
+        .port = 8080,
+        .keep_alive_timeout = 0, // disable for benchmarks
+    });
     try server.listen();
 }

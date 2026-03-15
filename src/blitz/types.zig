@@ -218,6 +218,10 @@ pub const Response = struct {
     body: ?[]const u8 = null,
     // For pre-computed raw responses (bypass serialization)
     raw: ?[]const u8 = null,
+    // Scratch buffer for small response bodies — avoids dangling pointers
+    // when handlers use stack-allocated buffers for writeI64/writeUsize
+    scratch: [128]u8 = undefined,
+    scratch_len: usize = 0,
 
     /// Set status
     pub fn setStatus(self: *Response, s: StatusCode) *Response {
@@ -225,7 +229,21 @@ pub const Response = struct {
         return self;
     }
 
-    /// Set body with content type
+    /// Copy data into the response's scratch buffer and set body to point to it.
+    /// Use this when the source data is on the handler's stack.
+    pub fn textBuf(self: *Response, data: []const u8) *Response {
+        if (data.len <= self.scratch.len) {
+            @memcpy(self.scratch[0..data.len], data);
+            self.scratch_len = data.len;
+            self.body = self.scratch[0..data.len];
+        } else {
+            self.body = data;
+        }
+        self.headers.set("Content-Type", "text/plain");
+        return self;
+    }
+
+    /// Set body with content type (data must outlive the response!)
     pub fn text(self: *Response, data: []const u8) *Response {
         self.body = data;
         self.headers.set("Content-Type", "text/plain");
