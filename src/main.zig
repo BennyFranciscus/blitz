@@ -68,6 +68,17 @@ fn handleUpload(req: *blitz.Request, res: *blitz.Response) void {
     }
 }
 
+fn handleWsUpgrade(req: *blitz.Request, res: *blitz.Response) void {
+    if (!blitz.websocket.isUpgradeRequest(req)) {
+        // Non-WebSocket request (e.g. health check curl) — return 200
+        _ = res.text("WebSocket endpoint");
+        return;
+    }
+    // Signal the server to handle the WebSocket upgrade
+    // The server will build the 101 response using the request headers
+    res.ws_upgraded = true;
+}
+
 fn handleStatic(req: *blitz.Request, res: *blitz.Response) void {
     const filepath = req.params.get("filepath") orelse {
         _ = res.setStatus(.not_found).text("Not Found");
@@ -159,12 +170,12 @@ fn loadDataset(path: []const u8) []const u8 {
 
     // Build gzip pre-compressed response
     const json_body = json_buf.items;
-    var gzip_buf = alloc.alloc(u8, json_body.len) catch {
+    const gzip_buf = alloc.alloc(u8, json_body.len) catch {
         json_buf.deinit();
         return out.toOwnedSlice() catch "";
     };
     var fbs = std.io.fixedBufferStream(gzip_buf);
-    var compressor = std.compress.gzip.compressor(fbs.writer(), .{ .level = .fast }) catch {
+    var compressor = std.compress.gzip.compressor(fbs.writer(), .{}) catch {
         alloc.free(gzip_buf);
         json_buf.deinit();
         return out.toOwnedSlice() catch "";
@@ -174,7 +185,7 @@ fn loadDataset(path: []const u8) []const u8 {
         json_buf.deinit();
         return out.toOwnedSlice() catch "";
     };
-    compressor.close() catch {
+    compressor.finish() catch {
         alloc.free(gzip_buf);
         json_buf.deinit();
         return out.toOwnedSlice() catch "";
@@ -327,6 +338,7 @@ pub fn main() !void {
     router.get("/json", handleJson);
     router.get("/compression", handleCompression);
     router.post("/upload", handleUpload);
+    router.get("/ws", handleWsUpgrade);
     router.get("/static/*filepath", handleStatic);
 
     // Check if io_uring backend is requested
