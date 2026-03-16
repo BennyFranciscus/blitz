@@ -321,8 +321,27 @@ pub const JsonParser = struct {
                     'u' => {
                         if (i + 4 >= raw.len) return null;
                         const hex = raw[i + 1 .. i + 5];
-                        const cp = std.fmt.parseInt(u21, hex, 16) catch return null;
+                        var cp: u21 = std.fmt.parseInt(u16, hex, 16) catch return null;
                         i += 4;
+                        // Handle UTF-16 surrogate pairs: \uD800-\uDBFF \uDC00-\uDFFF
+                        if (cp >= 0xD800 and cp <= 0xDBFF) {
+                            // High surrogate — must be followed by \uDCxx low surrogate
+                            if (i + 2 < raw.len and raw[i + 1] == '\\' and i + 3 < raw.len and raw[i + 2] == 'u') {
+                                if (i + 6 >= raw.len) return null;
+                                const low_hex = raw[i + 3 .. i + 7];
+                                const low: u16 = std.fmt.parseInt(u16, low_hex, 16) catch return null;
+                                if (low >= 0xDC00 and low <= 0xDFFF) {
+                                    cp = (@as(u21, cp - 0xD800) << 10) + @as(u21, low - 0xDC00) + 0x10000;
+                                    i += 6; // skip \uXXXX
+                                } else {
+                                    return null; // High surrogate not followed by low surrogate
+                                }
+                            } else {
+                                return null; // Unpaired high surrogate
+                            }
+                        } else if (cp >= 0xDC00 and cp <= 0xDFFF) {
+                            return null; // Lone low surrogate is invalid
+                        }
                         // Encode as UTF-8
                         if (cp < 0x80) {
                             unescape_arena[arena_pos] = @intCast(cp);
@@ -332,12 +351,19 @@ pub const JsonParser = struct {
                             unescape_arena[arena_pos] = @intCast(0xC0 | (cp >> 6));
                             unescape_arena[arena_pos + 1] = @intCast(0x80 | (cp & 0x3F));
                             arena_pos += 2;
-                        } else {
+                        } else if (cp < 0x10000) {
                             if (arena_pos + 3 > unescape_arena.len) return null;
                             unescape_arena[arena_pos] = @intCast(0xE0 | (cp >> 12));
                             unescape_arena[arena_pos + 1] = @intCast(0x80 | ((cp >> 6) & 0x3F));
                             unescape_arena[arena_pos + 2] = @intCast(0x80 | (cp & 0x3F));
                             arena_pos += 3;
+                        } else {
+                            if (arena_pos + 4 > unescape_arena.len) return null;
+                            unescape_arena[arena_pos] = @intCast(0xF0 | (cp >> 18));
+                            unescape_arena[arena_pos + 1] = @intCast(0x80 | ((cp >> 12) & 0x3F));
+                            unescape_arena[arena_pos + 2] = @intCast(0x80 | ((cp >> 6) & 0x3F));
+                            unescape_arena[arena_pos + 3] = @intCast(0x80 | (cp & 0x3F));
+                            arena_pos += 4;
                         }
                     },
                     else => {
@@ -727,6 +753,25 @@ test "JsonParser: unicode escape" {
     const Val = struct { s: []const u8 };
     const result = JsonParser.parse(Val, "{\"s\":\"\\u0041\\u0042\"}") orelse unreachable;
     try testing.expectEqualStrings("AB", result.s);
+}
+
+test "JsonParser: surrogate pair emoji" {
+    const Val = struct { s: []const u8 };
+    // \uD83D\uDE00 = U+1F600 (😀) encoded as UTF-16 surrogate pair
+    const result = JsonParser.parse(Val, "{\"s\":\"\\uD83D\\uDE00\"}") orelse unreachable;
+    try testing.expectEqualStrings("\xF0\x9F\x98\x80", result.s); // 😀 in UTF-8
+}
+
+test "JsonParser: lone high surrogate rejected" {
+    const Val = struct { s: []const u8 };
+    // \uD83D alone is invalid — unpaired high surrogate
+    try testing.expect(JsonParser.parse(Val, "{\"s\":\"\\uD83D\"}") == null);
+}
+
+test "JsonParser: lone low surrogate rejected" {
+    const Val = struct { s: []const u8 };
+    // \uDE00 alone is invalid — lone low surrogate
+    try testing.expect(JsonParser.parse(Val, "{\"s\":\"\\uDE00\"}") == null);
 }
 
 test "JsonParser: skip array value" {
