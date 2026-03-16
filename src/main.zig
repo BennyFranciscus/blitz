@@ -4,6 +4,7 @@ const blitz = @import("blitz.zig");
 
 // ── Global pre-computed responses ───────────────────────────────────
 var dataset_json_resp: []const u8 = "";
+var dataset_gzip_resp: []const u8 = "";
 
 const StaticFile = struct {
     name: []const u8,
@@ -39,6 +40,18 @@ fn handleBaseline2(req: *blitz.Request, res: *blitz.Response) void {
 }
 
 fn handleJson(_: *blitz.Request, res: *blitz.Response) void {
+    _ = res.rawResponse(dataset_json_resp);
+}
+
+fn handleCompression(req: *blitz.Request, res: *blitz.Response) void {
+    // Check if client accepts gzip
+    if (req.headers.get("Accept-Encoding")) |ae| {
+        if (mem.indexOf(u8, ae, "gzip") != null) {
+            _ = res.rawResponse(dataset_gzip_resp);
+            return;
+        }
+    }
+    // Fallback: uncompressed JSON
     _ = res.rawResponse(dataset_json_resp);
 }
 
@@ -143,6 +156,41 @@ fn loadDataset(path: []const u8) []const u8 {
     out.appendSlice(blitz.writeUsize(&cl_buf, json_buf.items.len)) catch return "";
     out.appendSlice("\r\n\r\n") catch return "";
     out.appendSlice(json_buf.items) catch return "";
+
+    // Build gzip pre-compressed response
+    const json_body = json_buf.items;
+    var gzip_buf = alloc.alloc(u8, json_body.len) catch {
+        json_buf.deinit();
+        return out.toOwnedSlice() catch "";
+    };
+    var fbs = std.io.fixedBufferStream(gzip_buf);
+    var compressor = std.compress.gzip.compressor(fbs.writer(), .{ .level = .fast }) catch {
+        alloc.free(gzip_buf);
+        json_buf.deinit();
+        return out.toOwnedSlice() catch "";
+    };
+    _ = compressor.write(json_body) catch {
+        alloc.free(gzip_buf);
+        json_buf.deinit();
+        return out.toOwnedSlice() catch "";
+    };
+    compressor.close() catch {
+        alloc.free(gzip_buf);
+        json_buf.deinit();
+        return out.toOwnedSlice() catch "";
+    };
+    const gzip_data = fbs.getWritten();
+
+    if (gzip_data.len > 0) {
+        var gzip_out = std.ArrayList(u8).init(alloc);
+        var gcl_buf: [32]u8 = undefined;
+        gzip_out.appendSlice("HTTP/1.1 200 OK\r\nServer: blitz\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nVary: Accept-Encoding\r\nContent-Length: ") catch {};
+        gzip_out.appendSlice(blitz.writeUsize(&gcl_buf, gzip_data.len)) catch {};
+        gzip_out.appendSlice("\r\n\r\n") catch {};
+        gzip_out.appendSlice(gzip_data) catch {};
+        dataset_gzip_resp = gzip_out.toOwnedSlice() catch "";
+    }
+    alloc.free(gzip_buf);
 
     json_buf.deinit();
     return out.toOwnedSlice() catch "";
@@ -277,6 +325,7 @@ pub fn main() !void {
     router.post("/baseline11", handleBaseline);
     router.get("/baseline2", handleBaseline2);
     router.get("/json", handleJson);
+    router.get("/compression", handleCompression);
     router.post("/upload", handleUpload);
     router.get("/static/*filepath", handleStatic);
 
