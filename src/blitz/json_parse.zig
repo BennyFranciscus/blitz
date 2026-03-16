@@ -36,6 +36,7 @@ pub const JsonParser = struct {
     /// Parse a JSON string into a comptime-known Zig type.
     /// Returns null on parse error.
     pub fn parse(comptime T: type, input: []const u8) ?T {
+        resetArena();
         var p = JsonParser.init(input);
         const result = p.parseValue(T) orelse return null;
         p.skipWhitespace();
@@ -46,6 +47,7 @@ pub const JsonParser = struct {
 
     /// Parse without requiring full consumption (for embedded JSON).
     pub fn parsePartial(comptime T: type, input: []const u8) ?T {
+        resetArena();
         var p = JsonParser.init(input);
         return p.parseValue(T);
     }
@@ -263,51 +265,58 @@ pub const JsonParser = struct {
     }
 
     /// For strings with escape sequences, we can't do zero-copy.
-    /// We use a static thread-local buffer for unescaping.
-    /// This limits escaped string length but avoids heap allocation.
-    threadlocal var unescape_buf: [8192]u8 = undefined;
+    /// We use a thread-local bump arena so each escaped string gets its own
+    /// region — no use-after-parse when multiple fields contain escapes.
+    /// The arena resets at the start of each top-level parse() call.
+    threadlocal var unescape_arena: [65536]u8 = undefined;
+    threadlocal var arena_pos: usize = 0;
+
+    /// Reset the bump arena — call at the start of each parse.
+    fn resetArena() void {
+        arena_pos = 0;
+    }
 
     fn unescapeString(self: *JsonParser, raw: []const u8) ?[]const u8 {
-        var out_pos: usize = 0;
+        const start_pos = arena_pos;
         var i: usize = 0;
 
         while (i < raw.len) {
-            if (out_pos >= unescape_buf.len) return null; // overflow
+            if (arena_pos >= unescape_arena.len) return null; // overflow
 
             if (raw[i] == '\\' and i + 1 < raw.len) {
                 i += 1;
                 switch (raw[i]) {
                     '"' => {
-                        unescape_buf[out_pos] = '"';
-                        out_pos += 1;
+                        unescape_arena[arena_pos] = '"';
+                        arena_pos += 1;
                     },
                     '\\' => {
-                        unescape_buf[out_pos] = '\\';
-                        out_pos += 1;
+                        unescape_arena[arena_pos] = '\\';
+                        arena_pos += 1;
                     },
                     '/' => {
-                        unescape_buf[out_pos] = '/';
-                        out_pos += 1;
+                        unescape_arena[arena_pos] = '/';
+                        arena_pos += 1;
                     },
                     'n' => {
-                        unescape_buf[out_pos] = '\n';
-                        out_pos += 1;
+                        unescape_arena[arena_pos] = '\n';
+                        arena_pos += 1;
                     },
                     'r' => {
-                        unescape_buf[out_pos] = '\r';
-                        out_pos += 1;
+                        unescape_arena[arena_pos] = '\r';
+                        arena_pos += 1;
                     },
                     't' => {
-                        unescape_buf[out_pos] = '\t';
-                        out_pos += 1;
+                        unescape_arena[arena_pos] = '\t';
+                        arena_pos += 1;
                     },
                     'b' => {
-                        unescape_buf[out_pos] = 0x08;
-                        out_pos += 1;
+                        unescape_arena[arena_pos] = 0x08;
+                        arena_pos += 1;
                     },
                     'f' => {
-                        unescape_buf[out_pos] = 0x0C;
-                        out_pos += 1;
+                        unescape_arena[arena_pos] = 0x0C;
+                        arena_pos += 1;
                     },
                     'u' => {
                         if (i + 4 >= raw.len) return null;
@@ -316,37 +325,37 @@ pub const JsonParser = struct {
                         i += 4;
                         // Encode as UTF-8
                         if (cp < 0x80) {
-                            unescape_buf[out_pos] = @intCast(cp);
-                            out_pos += 1;
+                            unescape_arena[arena_pos] = @intCast(cp);
+                            arena_pos += 1;
                         } else if (cp < 0x800) {
-                            if (out_pos + 2 > unescape_buf.len) return null;
-                            unescape_buf[out_pos] = @intCast(0xC0 | (cp >> 6));
-                            unescape_buf[out_pos + 1] = @intCast(0x80 | (cp & 0x3F));
-                            out_pos += 2;
+                            if (arena_pos + 2 > unescape_arena.len) return null;
+                            unescape_arena[arena_pos] = @intCast(0xC0 | (cp >> 6));
+                            unescape_arena[arena_pos + 1] = @intCast(0x80 | (cp & 0x3F));
+                            arena_pos += 2;
                         } else {
-                            if (out_pos + 3 > unescape_buf.len) return null;
-                            unescape_buf[out_pos] = @intCast(0xE0 | (cp >> 12));
-                            unescape_buf[out_pos + 1] = @intCast(0x80 | ((cp >> 6) & 0x3F));
-                            unescape_buf[out_pos + 2] = @intCast(0x80 | (cp & 0x3F));
-                            out_pos += 3;
+                            if (arena_pos + 3 > unescape_arena.len) return null;
+                            unescape_arena[arena_pos] = @intCast(0xE0 | (cp >> 12));
+                            unescape_arena[arena_pos + 1] = @intCast(0x80 | ((cp >> 6) & 0x3F));
+                            unescape_arena[arena_pos + 2] = @intCast(0x80 | (cp & 0x3F));
+                            arena_pos += 3;
                         }
                     },
                     else => {
                         // Unknown escape — pass through
-                        unescape_buf[out_pos] = raw[i];
-                        out_pos += 1;
+                        unescape_arena[arena_pos] = raw[i];
+                        arena_pos += 1;
                     },
                 }
                 i += 1;
             } else {
-                unescape_buf[out_pos] = raw[i];
-                out_pos += 1;
+                unescape_arena[arena_pos] = raw[i];
+                arena_pos += 1;
                 i += 1;
             }
         }
 
         self.pos += 1; // skip closing "
-        return unescape_buf[0..out_pos];
+        return unescape_arena[start_pos..arena_pos];
     }
 
     // ── Structs (JSON objects) ──────────────────────────────────────
@@ -806,6 +815,22 @@ test "JsonParser: enum from string" {
     const Val = struct { status: Status };
     const result = JsonParser.parse(Val, "{\"status\":\"active\"}") orelse unreachable;
     try testing.expectEqual(Status.active, result.status);
+}
+
+test "JsonParser: multiple escaped fields retain independent data" {
+    const Val = struct { a: []const u8, b: []const u8 };
+    const result = JsonParser.parse(Val, "{\"a\":\"hello\\nworld\",\"b\":\"foo\\tbar\"}") orelse unreachable;
+    // Before fix: field `a` would point at `foo\tbar` (clobbered by second parse)
+    try testing.expectEqualStrings("hello\nworld", result.a);
+    try testing.expectEqualStrings("foo\tbar", result.b);
+}
+
+test "JsonParser: three escaped fields in sequence" {
+    const Val = struct { x: []const u8, y: []const u8, z: []const u8 };
+    const result = JsonParser.parse(Val, "{\"x\":\"a\\nb\",\"y\":\"c\\td\",\"z\":\"e\\\\f\"}") orelse unreachable;
+    try testing.expectEqualStrings("a\nb", result.x);
+    try testing.expectEqualStrings("c\td", result.y);
+    try testing.expectEqualStrings("e\\f", result.z);
 }
 
 test "JsonParser: skip string with escapes in unknown field" {
