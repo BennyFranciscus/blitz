@@ -607,7 +607,11 @@ fn reactorThread(
                         continue;
                     }
 
-                    const recv_data = buf_group.get_cqe(cqe) catch continue;
+                    const recv_data = buf_group.get_cqe(cqe) catch {
+                        // Failed to extract data — return buffer to avoid leak
+                        buf_group.put_cqe(cqe) catch {};
+                        continue;
+                    };
 
                     const uidx: usize = @intCast(@as(u32, @bitCast(fd)));
                     if (uidx < MAX_CONNS) {
@@ -883,6 +887,7 @@ fn closeConn(
     alloc: std.mem.Allocator,
     use_direct_fds: bool,
 ) void {
+    _ = ring;
     const uidx: usize = @intCast(@as(u32, @bitCast(fd)));
     if (uidx < MAX_CONNS) {
         if (conns[uidx]) |st| {
@@ -891,7 +896,8 @@ fn closeConn(
         }
     }
     if (use_direct_fds) {
-        _ = ring.close_direct(packUserData(.close, fd), @intCast(@as(u32, @bitCast(fd)))) catch {};
+        // Note: can't close_direct without ring access
+        posix.close(@intCast(@as(u32, @bitCast(fd))));
     } else {
         posix.close(@intCast(@as(u32, @bitCast(fd))));
     }
