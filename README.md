@@ -16,7 +16,7 @@
 
 - 🏎️ **3.06M req/s baseline** — #3 on [HttpArena](https://github.com/MDA2AV/HttpArena), ahead of nginx, hyper, and actix
 - 🚀 **38.9M req/s pipelined** — pipeline batching for maximum throughput
-- 🧠 **Zero-copy HTTP parsing** — request data stays in the read buffer, no allocations in the hot path
+- 🧠 **Zero-copy HTTP parsing** — parse directly from kernel recv buffers, no memcpy in the hot path
 - ⚙️ **Dual backend** — epoll (default) or io_uring with multishot accept, buffer rings, and zero-copy send
 - 🌳 **Radix-trie router** — path params, wildcards, route groups, per-route middleware
 - 📦 **Batteries included** — JSON serialization + parsing, cookies, compression, CORS, rate limiting, WebSocket, static files
@@ -183,7 +183,7 @@ Runtime templates also supported via `blitz.parseRuntimeTemplate()` for user-pro
 
 ```bash
 zig build -Doptimize=ReleaseFast    # build
-zig build test                       # 308 unit tests
+zig build test                       # 316 unit tests
 
 # Run with epoll (default)
 ./zig-out/bin/blitz
