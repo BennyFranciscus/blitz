@@ -735,85 +735,146 @@ fn reactorThread(
                         continue;
                     }
 
-                    // Normal mode — copy recv data into connection buffer
-                    if (st.dyn_buf) |dbuf| {
-                        const space = dbuf.len - st.dyn_len;
-                        const copy_len = @min(recv_data.len, space);
-                        @memcpy(dbuf[st.dyn_len..][0..copy_len], recv_data[0..copy_len]);
-                        st.dyn_len += copy_len;
-                    } else {
-                        const space = st.read_buf.len - st.read_len;
-                        const copy_len = @min(recv_data.len, space);
-                        @memcpy(st.read_buf[st.read_len..][0..copy_len], recv_data[0..copy_len]);
-                        st.read_len += copy_len;
-                    }
-
-                    // Return buffer to kernel (zero-SQE)
-                    buf_group.put_cqe(cqe) catch {};
-
-                    // Parse and handle pipelined requests
-                    var off: usize = 0;
-                    const cur_len = st.activeReadLen();
-                    const cur_data = st.readSlice();
-                    while (off < cur_len) {
-                        const result = parser.parse(cur_data[off..cur_len]) orelse {
-                            const remaining = cur_data[off..cur_len];
-                            if (simd.findHeaderEnd(remaining)) |hdr_end| {
-                                const hdr_data = remaining[0 .. hdr_end + 4];
-                                if (parser.parseHeaders(hdr_data)) |hdr_result| {
-                                    if (hdr_result.content_length != null and hdr_result.content_length.? > BODY_DISCARD_THRESHOLD) {
-                                        const body_bytes_in_buf = cur_len - off - (hdr_end + 4);
-                                        st.enterDiscardMode(hdr_result, body_bytes_in_buf);
-                                        off = cur_len;
-                                        break;
+                    // Normal mode — try zero-copy parse directly from kernel buffer first
+                    // When no leftover data exists, we can parse the recv buffer in-place
+                    // and skip the memcpy entirely. Only copy unconsumed leftovers.
+                    if (st.read_len == 0 and st.dyn_buf == null) {
+                        // Fast path: parse directly from kernel recv buffer
+                        var off: usize = 0;
+                        var did_ws_upgrade = false;
+                        while (off < recv_data.len) {
+                            const result = parser.parse(recv_data[off..recv_data.len]) orelse {
+                                const remaining = recv_data[off..recv_data.len];
+                                if (simd.findHeaderEnd(remaining)) |hdr_end| {
+                                    const hdr_data = remaining[0 .. hdr_end + 4];
+                                    if (parser.parseHeaders(hdr_data)) |hdr_result| {
+                                        if (hdr_result.content_length != null and hdr_result.content_length.? > BODY_DISCARD_THRESHOLD) {
+                                            const body_bytes_in_buf = recv_data.len - off - (hdr_end + 4);
+                                            st.enterDiscardMode(hdr_result, body_bytes_in_buf);
+                                            off = recv_data.len;
+                                            break;
+                                        }
+                                    }
+                                    const bad_resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request";
+                                    st.write_buf.appendSlice(bad_resp) catch {};
+                                    off += hdr_end + 4;
+                                    break;
+                                }
+                                break;
+                            };
+                            var req = result.request;
+                            req.ctx = app_ctx;
+                            var resp = Response{};
+                            if (shutdown_flag.load(.acquire)) resp.headers.set("Connection", "close");
+                            const req_start = if (logging) log_mod.now() else 0;
+                            router.handle(&req, &resp);
+                            if (resp.ws_upgraded) {
+                                if (req.headers.get("Sec-WebSocket-Key")) |ws_key| {
+                                    var upgrade_buf_ws: [256]u8 = undefined;
+                                    if (websocket.buildUpgradeResponse(&upgrade_buf_ws, ws_key, null)) |upgrade_resp| {
+                                        st.write_buf.appendSlice(upgrade_resp) catch {};
                                     }
                                 }
-                                const bad_resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request";
-                                st.write_buf.appendSlice(bad_resp) catch {};
-                                off += hdr_end + 4;
+                                st.ws_mode = true;
+                                off += result.total_len;
+                                did_ws_upgrade = true;
                                 break;
                             }
-                            break;
-                        };
-                        var req = result.request;
-                        req.ctx = app_ctx;
-                        var resp = Response{};
-                        if (shutdown_flag.load(.acquire)) resp.headers.set("Connection", "close");
-                        const req_start = if (logging) log_mod.now() else 0;
-                        router.handle(&req, &resp);
-
-                        // Check if handler upgraded to WebSocket
-                        if (resp.ws_upgraded) {
-                            if (req.headers.get("Sec-WebSocket-Key")) |ws_key| {
-                                var upgrade_buf: [256]u8 = undefined;
-                                if (websocket.buildUpgradeResponse(&upgrade_buf, ws_key, null)) |upgrade_resp| {
-                                    st.write_buf.appendSlice(upgrade_resp) catch {};
-                                }
-                            }
-                            st.ws_mode = true;
+                            if (compression_enabled) _ = compress_mod.compressResponse(&compress_buf, &req, &resp);
+                            if (logging) log_mod.logRequest(log_config, &req, &resp, req_start);
+                            resp.writeTo(&st.write_buf);
                             off += result.total_len;
-                            break; // stop HTTP parsing — switch to WebSocket mode
+                        }
+                        // Copy any unconsumed leftover to read_buf
+                        if (off < recv_data.len and !st.isDiscarding() and !did_ws_upgrade) {
+                            const rem = recv_data.len - off;
+                            const copy_len = @min(rem, st.read_buf.len);
+                            @memcpy(st.read_buf[0..copy_len], recv_data[off..][0..copy_len]);
+                            st.read_len = copy_len;
+                        }
+                        // Return buffer to kernel
+                        buf_group.put_cqe(cqe) catch {};
+                    } else {
+                        // Slow path: connection has leftover data — must accumulate
+                        if (st.dyn_buf) |dbuf| {
+                            const space = dbuf.len - st.dyn_len;
+                            const copy_len = @min(recv_data.len, space);
+                            @memcpy(dbuf[st.dyn_len..][0..copy_len], recv_data[0..copy_len]);
+                            st.dyn_len += copy_len;
+                        } else {
+                            const space = st.read_buf.len - st.read_len;
+                            const copy_len = @min(recv_data.len, space);
+                            @memcpy(st.read_buf[st.read_len..][0..copy_len], recv_data[0..copy_len]);
+                            st.read_len += copy_len;
                         }
 
-                        if (compression_enabled) _ = compress_mod.compressResponse(&compress_buf, &req, &resp);
-                        if (logging) log_mod.logRequest(log_config, &req, &resp, req_start);
-                        resp.writeTo(&st.write_buf);
-                        off += result.total_len;
-                    }
+                        // Return buffer to kernel (zero-SQE)
+                        buf_group.put_cqe(cqe) catch {};
 
-                    // Compact read buffer
-                    if (off > 0 and !st.isDiscarding()) {
-                        if (st.dyn_buf != null) {
-                            const rem = st.dyn_len - off;
-                            if (rem > 0 and rem <= 65536) {
-                                @memcpy(st.read_buf[0..rem], st.dyn_buf.?[off..st.dyn_len]);
+                        // Parse and handle pipelined requests
+                        var off: usize = 0;
+                        const cur_len = st.activeReadLen();
+                        const cur_data = st.readSlice();
+                        while (off < cur_len) {
+                            const result = parser.parse(cur_data[off..cur_len]) orelse {
+                                const remaining = cur_data[off..cur_len];
+                                if (simd.findHeaderEnd(remaining)) |hdr_end| {
+                                    const hdr_data = remaining[0 .. hdr_end + 4];
+                                    if (parser.parseHeaders(hdr_data)) |hdr_result| {
+                                        if (hdr_result.content_length != null and hdr_result.content_length.? > BODY_DISCARD_THRESHOLD) {
+                                            const body_bytes_in_buf = cur_len - off - (hdr_end + 4);
+                                            st.enterDiscardMode(hdr_result, body_bytes_in_buf);
+                                            off = cur_len;
+                                            break;
+                                        }
+                                    }
+                                    const bad_resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request";
+                                    st.write_buf.appendSlice(bad_resp) catch {};
+                                    off += hdr_end + 4;
+                                    break;
+                                }
+                                break;
+                            };
+                            var req = result.request;
+                            req.ctx = app_ctx;
+                            var resp = Response{};
+                            if (shutdown_flag.load(.acquire)) resp.headers.set("Connection", "close");
+                            const req_start = if (logging) log_mod.now() else 0;
+                            router.handle(&req, &resp);
+
+                            // Check if handler upgraded to WebSocket
+                            if (resp.ws_upgraded) {
+                                if (req.headers.get("Sec-WebSocket-Key")) |ws_key| {
+                                    var upgrade_buf_ws2: [256]u8 = undefined;
+                                    if (websocket.buildUpgradeResponse(&upgrade_buf_ws2, ws_key, null)) |upgrade_resp| {
+                                        st.write_buf.appendSlice(upgrade_resp) catch {};
+                                    }
+                                }
+                                st.ws_mode = true;
+                                off += result.total_len;
+                                break; // stop HTTP parsing — switch to WebSocket mode
                             }
-                            st.revertToStatic();
-                            st.read_len = if (rem <= 65536) rem else 0;
-                        } else {
-                            const rem = st.read_len - off;
-                            if (rem > 0) std.mem.copyForwards(u8, st.read_buf[0..rem], st.read_buf[off..st.read_len]);
-                            st.read_len = rem;
+
+                            if (compression_enabled) _ = compress_mod.compressResponse(&compress_buf, &req, &resp);
+                            if (logging) log_mod.logRequest(log_config, &req, &resp, req_start);
+                            resp.writeTo(&st.write_buf);
+                            off += result.total_len;
+                        }
+
+                        // Compact read buffer
+                        if (off > 0 and !st.isDiscarding()) {
+                            if (st.dyn_buf != null) {
+                                const rem = st.dyn_len - off;
+                                if (rem > 0 and rem <= 65536) {
+                                    @memcpy(st.read_buf[0..rem], st.dyn_buf.?[off..st.dyn_len]);
+                                }
+                                st.revertToStatic();
+                                st.read_len = if (rem <= 65536) rem else 0;
+                            } else {
+                                const rem = st.read_len - off;
+                                if (rem > 0) std.mem.copyForwards(u8, st.read_buf[0..rem], st.read_buf[off..st.read_len]);
+                                st.read_len = rem;
+                            }
                         }
                     }
 
