@@ -715,73 +715,16 @@ fn reactorThread(
                         // Return buffer to kernel
                         buf_group.put_cqe(cqe) catch {};
 
-                        // Parse and echo WebSocket frames
-                        var ws_off: usize = 0;
-                        var ws_close = false;
-                        while (ws_off < st.read_len) {
-                            const ws_parse = websocket.parseFrame(st.read_buf[ws_off..st.read_len]) orelse break;
-                            const frame = ws_parse.frame;
-                            switch (frame.opcode) {
-                                .text, .binary => {
-                                    var ws_frame_buf: [65536 + 14]u8 = undefined;
-                                    if (websocket.buildFrame(&ws_frame_buf, frame.opcode, frame.payload, frame.fin)) |echo_frame| {
-                                        st.write_buf.appendSlice(echo_frame) catch {};
-                                    }
-                                },
-                                .ping => {
-                                    var pong_buf: [131]u8 = undefined;
-                                    if (websocket.buildFrame(&pong_buf, .pong, frame.payload, true)) |pong_frame| {
-                                        st.write_buf.appendSlice(pong_frame) catch {};
-                                    }
-                                },
-                                .close => {
-                                    var close_buf: [131]u8 = undefined;
-                                    if (websocket.buildCloseFrame(&close_buf, .normal, "")) |close_frame| {
-                                        st.write_buf.appendSlice(close_frame) catch {};
-                                    }
-                                    ws_close = true;
-                                },
-                                else => {},
-                            }
-                            ws_off += ws_parse.consumed;
+                        // CRITICAL: Do NOT append to write_buf while send is in-flight!
+                        // ArrayList.appendSlice can trigger reallocation, freeing the memory
+                        // that io_uring's in-flight send SQE is reading from (use-after-free).
+                        // Instead, just buffer recv data — frames will be processed when
+                        // the send completes and calls processWsFrames().
+                        if (!st.send_inflight) {
+                            processWsFrames(st, &ring, cqe_gen, fd, &send_zc_state, &needs_submit, &conns, &conn_gens, &pool_opt, alloc, &active_conns);
                         }
 
-                        // Compact read buffer
-                        if (ws_off > 0) {
-                            const ws_rem = st.read_len - ws_off;
-                            if (ws_rem > 0) {
-                                std.mem.copyForwards(u8, st.read_buf[0..ws_rem], st.read_buf[ws_off..st.read_len]);
-                            }
-                            st.read_len = ws_rem;
-                        }
-
-                        // Submit send if data ready
-                        if (st.write_buf.items.len > st.write_off and !st.send_inflight) {
-                            const send_data = st.write_buf.items[st.write_off..];
-                            if (send_zc_state != 2) {
-                                armSendZc(&ring, cqe_gen, fd, send_data) catch {
-                                    armSend(&ring, cqe_gen, fd, send_data) catch {};
-                                };
-                            } else {
-                                armSend(&ring, cqe_gen, fd, send_data) catch {};
-                            }
-                            st.send_inflight = true;
-                            needs_submit = true;
-                        }
-
-                        if (ws_close) {
-                            // Flush close frame then close connection
-                            if (st.write_buf.items.len > st.write_off and !st.send_inflight) {
-                                const send_data2 = st.write_buf.items[st.write_off..];
-                                armSend(&ring, cqe_gen, fd, send_data2) catch {};
-                                st.send_inflight = true;
-                                needs_submit = true;
-                            }
-                            // Close after send completes (send handler will see ws_close flag)
-                            // For simplicity, close immediately — close frame already queued
-                            closeConn(&conns, &conn_gens, &pool_opt, &ring, fd, alloc, false);
-                            active_conns -|= 1;
-                        } else if (!has_more) {
+                        if (!has_more and conns[@intCast(@as(u32, @bitCast(fd)))] != null) {
                             _ = buf_group.recv_multishot(packUserData(.recv, cqe_gen, fd), fd, 0) catch {};
                             needs_submit = true;
                         }
@@ -906,6 +849,8 @@ fn reactorThread(
                             st.write_off = 0;
                             if (shutdown_flag.load(.acquire)) {
                                 closeConn(&conns, &conn_gens, &pool_opt, &ring, fd, alloc, false); active_conns -|= 1;
+                            } else if (st.ws_mode and st.read_len > 0) {
+                                processWsFrames(st, &ring, cqe_gen, fd, &send_zc_state, &needs_submit, &conns, &conn_gens, &pool_opt, alloc, &active_conns);
                             }
                         }
                         continue;
@@ -948,6 +893,9 @@ fn reactorThread(
                             st.write_off = 0;
                             if (shutdown_flag.load(.acquire)) {
                                 closeConn(&conns, &conn_gens, &pool_opt, &ring, fd, alloc, false); active_conns -|= 1;
+                            } else if (st.ws_mode and st.read_len > 0) {
+                                // Process WebSocket frames that were deferred during send
+                                processWsFrames(st, &ring, cqe_gen, fd, &send_zc_state, &needs_submit, &conns, &conn_gens, &pool_opt, alloc, &active_conns);
                             }
                         }
                     }
@@ -1010,6 +958,80 @@ fn closeConn(
         posix.close(@intCast(@as(u32, @bitCast(fd))));
     } else {
         posix.close(@intCast(@as(u32, @bitCast(fd))));
+    }
+}
+
+/// Process buffered WebSocket frames from read_buf into write_buf.
+/// MUST only be called when send_inflight is false (safe to mutate write_buf).
+fn processWsFrames(
+    st: *ConnState,
+    ring: *IoUring,
+    gen: u28,
+    fd: i32,
+    send_zc_state: *u8,
+    needs_submit: *bool,
+    conns: *[MAX_CONNS]?*ConnState,
+    conn_gens: *[MAX_CONNS]u28,
+    pool_opt: *?UringConnPool,
+    alloc: std.mem.Allocator,
+    active_conns: *usize,
+) void {
+    var ws_off: usize = 0;
+    var ws_close = false;
+    while (ws_off < st.read_len) {
+        const ws_parse = websocket.parseFrame(st.read_buf[ws_off..st.read_len]) orelse break;
+        const frame = ws_parse.frame;
+        switch (frame.opcode) {
+            .text, .binary => {
+                var ws_frame_buf: [65536 + 14]u8 = undefined;
+                if (websocket.buildFrame(&ws_frame_buf, frame.opcode, frame.payload, frame.fin)) |echo_frame| {
+                    st.write_buf.appendSlice(echo_frame) catch {};
+                }
+            },
+            .ping => {
+                var pong_buf: [131]u8 = undefined;
+                if (websocket.buildFrame(&pong_buf, .pong, frame.payload, true)) |pong_frame| {
+                    st.write_buf.appendSlice(pong_frame) catch {};
+                }
+            },
+            .close => {
+                var close_buf: [131]u8 = undefined;
+                if (websocket.buildCloseFrame(&close_buf, .normal, "")) |close_frame| {
+                    st.write_buf.appendSlice(close_frame) catch {};
+                }
+                ws_close = true;
+            },
+            else => {},
+        }
+        ws_off += ws_parse.consumed;
+    }
+
+    // Compact read buffer
+    if (ws_off > 0) {
+        const ws_rem = st.read_len - ws_off;
+        if (ws_rem > 0) {
+            std.mem.copyForwards(u8, st.read_buf[0..ws_rem], st.read_buf[ws_off..st.read_len]);
+        }
+        st.read_len = ws_rem;
+    }
+
+    // Submit send if data ready
+    if (st.write_buf.items.len > st.write_off) {
+        const send_data = st.write_buf.items[st.write_off..];
+        if (send_zc_state.* != 2) {
+            armSendZc(ring, gen, fd, send_data) catch {
+                armSend(ring, gen, fd, send_data) catch {};
+            };
+        } else {
+            armSend(ring, gen, fd, send_data) catch {};
+        }
+        st.send_inflight = true;
+        needs_submit.* = true;
+    }
+
+    if (ws_close) {
+        closeConn(conns, conn_gens, pool_opt, ring, fd, alloc, false);
+        active_conns.* -|= 1;
     }
 }
 
