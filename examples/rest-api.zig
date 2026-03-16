@@ -2,8 +2,14 @@ const std = @import("std");
 const blitz = @import("blitz");
 
 // ── Application State ───────────────────────────────────────────────
-// In a real app, this would hold DB connections, config, etc.
-// Zig doesn't have closures, so we use file-scope state.
+// Application state is injected via req.context(AppState) in handlers.
+// Set once via Server config, shared across all threads (read-only or thread-safe).
+
+const AppState = struct {
+    name: []const u8,
+    version: []const u8,
+    rate_limiter: *blitz.RateLimiter,
+};
 
 var rate_limiter: blitz.RateLimiter = undefined;
 
@@ -43,11 +49,12 @@ fn requireAuth(req: *blitz.Request, res: *blitz.Response) bool {
 
 // ── Public Handlers ────────────────────────────────────────────────
 
-fn healthCheck(_: *blitz.Request, res: *blitz.Response) void {
+fn healthCheck(req: *blitz.Request, res: *blitz.Response) void {
+    const app = req.context(AppState);
     var buf: [128]u8 = undefined;
     const body = blitz.Json.stringify(&buf, .{
         .status = "healthy",
-        .version = "1.0.0",
+        .version = app.version,
     }) orelse "{\"status\":\"healthy\"}";
     _ = res.json(body);
 }
@@ -282,9 +289,16 @@ pub fn main() !void {
     // JSON 404 handler
     router.notFound(blitz.jsonNotFoundHandler);
 
+    var app_state = AppState{
+        .name = "blitz-rest-api",
+        .version = "1.0.0",
+        .rate_limiter = &rate_limiter,
+    };
+
     var server = blitz.Server.init(&router, .{
         .port = 8080,
         .compression = true,
+        .context = @ptrCast(&app_state),
         .logging = .{
             .enabled = true,
             .format = .text,

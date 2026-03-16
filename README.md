@@ -20,6 +20,7 @@
 - ⚙️ **Dual backend** — epoll (default) or io_uring with multishot accept, buffer rings, and zero-copy send
 - 🌳 **Radix-trie router** — path params, wildcards, route groups, per-route middleware
 - 📦 **Batteries included** — JSON serialization + parsing, cookies, compression, CORS, rate limiting, WebSocket, static files
+- 🔧 **Context injection** — typed application state accessible in every handler via `req.context(T)`
 - 🔌 **Graceful shutdown** — SIGTERM/SIGINT handling, connection draining, Docker-ready
 - 📝 **Structured logging** — text or JSON format, latency tracking, slow request detection
 
@@ -73,6 +74,34 @@ Tested on [HttpArena](https://github.com/MDA2AV/HttpArena) — 64-core AMD Threa
 | WebSocket echo (p=16) | **50.2M** msg/s |
 | Noisy (mixed traffic) | **1.99M** req/s |
 
+## Context Injection
+
+Pass application state (DB connections, config, services) to handlers:
+
+```zig
+const AppState = struct {
+    db: *Database,
+    config: *AppConfig,
+};
+
+fn getUsers(req: *blitz.Request, res: *blitz.Response) void {
+    const app = req.context(AppState);
+    // Use app.db, app.config, etc.
+}
+
+pub fn main() !void {
+    var state = AppState{ .db = &db, .config = &config };
+    var router = blitz.Router.init(std.heap.c_allocator);
+    router.get("/users", getUsers);
+
+    var server = blitz.Server.init(&router, .{
+        .port = 8080,
+        .context = @ptrCast(&state),
+    });
+    try server.listen();
+}
+```
+
 ## Documentation
 
 📖 **[Full API Documentation](https://bennyfranciscus.github.io/blitz/)** — routing, middleware, JSON, WebSocket, compression, and more.
@@ -81,7 +110,7 @@ Tested on [HttpArena](https://github.com/MDA2AV/HttpArena) — 64-core AMD Threa
 
 ```bash
 zig build -Doptimize=ReleaseFast    # build
-zig build test                       # 270 unit tests
+zig build test                       # 279 unit tests
 
 # Run with epoll (default)
 ./zig-out/bin/blitz

@@ -41,6 +41,7 @@
     <a href="#compression">Compression</a>
     <a href="#rate-limiting">Rate Limiting</a>
     <a href="#cors">CORS</a>
+    <a href="#context">Context Injection</a>
     <a href="#error-handling">Error Handling</a>
     <a href="#logging">Logging</a>
     <a href="#graceful-shutdown">Graceful Shutdown</a>
@@ -641,6 +642,36 @@ router.use(blitz.Cors.middleware(.{
 
   <p>The CORS middleware automatically handles OPTIONS preflight requests (returns 204 with appropriate headers) and sets <code>Access-Control-Allow-Origin</code>, <code>Vary</code>, and <code>Access-Control-Allow-Credentials</code> headers on all responses.</p>
   <p>When <code>allow_credentials</code> is true, the middleware echoes the request's <code>Origin</code> header instead of using <code>*</code> (as required by the spec).</p>
+</section>
+
+<!-- ─── Context Injection ─── -->
+<section id="context">
+  <h2>Context Injection</h2>
+  <p>Pass application state (database connections, config, services) to handlers without global variables.</p>
+  <pre><code>const AppState = struct {
+    db: *Database,
+    config: *AppConfig,
+};
+
+fn getUsers(req: *blitz.Request, res: *blitz.Response) void {
+    const app = req.context(AppState);
+    const users = app.db.query("SELECT * FROM users");
+    // ...
+}
+
+pub fn main() !void {
+    var state = AppState{ .db = &amp;db, .config = &amp;config };
+    var router = blitz.Router.init(std.heap.c_allocator);
+    router.get("/users", getUsers);
+
+    var server = blitz.Server.init(&amp;router, .{
+        .port = 8080,
+        .context = @ptrCast(&amp;state),
+    });
+    try server.listen();
+}</code></pre>
+  <p>The context is set once via <code>Server.Config.context</code> and automatically injected into every request. Access it in any handler with <code>req.context(T)</code> which returns a typed pointer.</p>
+  <p>Works with both epoll and io_uring backends. The context pointer is shared across all threads — ensure your state is either read-only or thread-safe (use atomics, mutexes, or per-thread copies).</p>
 </section>
 
 <!-- ─── Error Handling ─── -->

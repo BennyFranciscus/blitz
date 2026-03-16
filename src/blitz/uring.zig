@@ -274,6 +274,7 @@ pub const Config = struct {
     compression: bool = true,
     shutdown_timeout: u32 = 30,
     logging: log_mod.LogConfig = .{},
+    context: ?*anyopaque = null, // application context — accessible via req.context(T) in handlers
 };
 
 // ── Shared shutdown state ───────────────────────────────────────────
@@ -503,6 +504,7 @@ fn reactorThread(
     const compression_enabled = config.compression;
     const log_config = config.logging;
     const logging = log_config.enabled;
+    const app_ctx = config.context;
 
     // Initialize io_uring with SINGLE_ISSUER + DEFER_TASKRUN
     var params = mem.zeroInit(linux.io_uring_params, .{
@@ -674,6 +676,7 @@ fn reactorThread(
                         if (st.discardComplete()) {
                             if (st.finishDiscard()) |hdr_result| {
                                 var req = hdr_result.request;
+                                req.ctx = app_ctx;
                                 var resp = Response{};
                                 if (shutdown_flag.load(.acquire)) resp.headers.set("Connection", "close");
                                 const req_start = if (logging) log_mod.now() else 0;
@@ -773,6 +776,7 @@ fn reactorThread(
                             break;
                         };
                         var req = result.request;
+                        req.ctx = app_ctx;
                         var resp = Response{};
                         if (shutdown_flag.load(.acquire)) resp.headers.set("Connection", "close");
                         const req_start = if (logging) log_mod.now() else 0;

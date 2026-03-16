@@ -138,6 +138,8 @@ pub const Request = struct {
     params: Params = .{},
     // Raw data for zero-copy access
     raw_header: []const u8,
+    // Application context — set via Server/UringServer config, accessible in handlers
+    ctx: ?*anyopaque = null,
 
     pub const Params = struct {
         keys: [8][]const u8 = undefined,
@@ -225,6 +227,17 @@ pub const Request = struct {
         const header = self.headers.get("Cookie") orelse return null;
         const jar = cookie_mod.parseCookies(header);
         return jar.get(name);
+    }
+
+    /// Get the application context as a typed pointer.
+    /// The context is set via Server config and shared across all handlers.
+    ///
+    /// Example:
+    ///   const AppState = struct { db: *Database, config: *AppConfig };
+    ///   const state = req.context(AppState);
+    ///   const users = state.db.query("SELECT * FROM users");
+    pub fn context(self: *const Request, comptime T: type) *T {
+        return @ptrCast(@alignCast(self.ctx.?));
     }
 };
 

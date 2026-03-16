@@ -2223,3 +2223,68 @@ test "pool ConnState discard reset clears state" {
     st.reset();
     try testing.expect(!st.isDiscarding());
 }
+
+// ── Context/State Injection Tests ───────────────────────────────────
+
+test "request context typed access" {
+    const AppState = struct {
+        counter: u32,
+        name: []const u8,
+    };
+    var state = AppState{ .counter = 42, .name = "blitz" };
+
+    var req = Request{
+        .method = .GET,
+        .path = "/test",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+        .ctx = @ptrCast(&state),
+    };
+
+    const ctx = req.context(AppState);
+    try testing.expectEqual(@as(u32, 42), ctx.counter);
+    try testing.expectEqualStrings("blitz", ctx.name);
+
+    // Mutation through context pointer
+    ctx.counter = 100;
+    try testing.expectEqual(@as(u32, 100), state.counter);
+}
+
+test "request context default is null" {
+    const req = Request{
+        .method = .GET,
+        .path = "/test",
+        .query = null,
+        .headers = .{},
+        .body = null,
+        .raw_header = "",
+    };
+    try testing.expect(req.ctx == null);
+}
+
+test "request context with router integration" {
+    const AppState = struct {
+        db_url: []const u8,
+    };
+    var state = AppState{ .db_url = "postgres://localhost/mydb" };
+
+    var router = Router.init(std.heap.page_allocator);
+    router.get("/health", struct {
+        fn handler(req: *Request, res: *Response) void {
+            const ctx = req.context(AppState);
+            _ = res.text(ctx.db_url);
+        }
+    }.handler);
+
+    // Simulate what the server does: set ctx before handle()
+    const input = "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    const result = parser_mod.parse(input) orelse unreachable;
+    var req = result.request;
+    req.ctx = @ptrCast(&state);
+    var res = Response{};
+
+    router.handle(&req, &res);
+    try testing.expectEqualStrings("postgres://localhost/mydb", res.body.?);
+}

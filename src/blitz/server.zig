@@ -38,6 +38,7 @@ pub const Config = struct {
     shutdown_timeout: u32 = 30, // seconds to drain connections before force-close (0 = immediate)
     compression: bool = true, // enable gzip/deflate response compression
     logging: log_mod.LogConfig = .{}, // request logging (disabled by default)
+    context: ?*anyopaque = null, // application context — accessible via req.context(T) in handlers
 };
 
 // ── Shared shutdown state (atomic, shared across worker threads) ─────
@@ -141,6 +142,7 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
     const drain_timeout: i64 = @intCast(config.shutdown_timeout);
     const compression_enabled = config.compression;
     const log_config = config.logging;
+    const app_ctx = config.context;
 
     // Initialize connection pool for this worker
     var pool = ConnPool.init(alloc, POOL_SIZE) catch return;
@@ -377,6 +379,7 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                         if (st.discardComplete()) {
                             if (st.finishDiscard()) |hdr_result| {
                                 var req = hdr_result.request;
+                                req.ctx = app_ctx;
                                 var res = Response{};
                                 if (shutdown_flag.load(.acquire)) {
                                     res.headers.set("Connection", "close");
@@ -446,6 +449,7 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                             break; // Incomplete data — wait for more
                         };
                         var req = result.request;
+                        req.ctx = app_ctx;
                         var res = Response{};
 
                         // During shutdown, signal clients to close
