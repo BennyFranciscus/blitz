@@ -308,7 +308,13 @@ pub const Response = struct {
         return self.redirect(location, .moved_permanently);
     }
 
-    /// Serialize response to writer
+    // Pre-computed response prefix for common 200 OK text/plain responses
+    const OK_TEXT_PREFIX = "HTTP/1.1 200 OK\r\nServer: blitz\r\nContent-Type: text/plain\r\nContent-Length: ";
+    const OK_JSON_PREFIX = "HTTP/1.1 200 OK\r\nServer: blitz\r\nContent-Type: application/json\r\nContent-Length: ";
+
+    /// Serialize response to writer.
+    /// Fast path for common 200 OK with text/plain or application/json and no extra headers.
+    /// Fallback path builds header into a stack buffer for minimum ArrayList appends.
     pub fn writeTo(self: *const Response, out: *std.ArrayList(u8)) void {
         if (self.raw) |r| {
             out.appendSlice(r) catch return;
@@ -316,29 +322,87 @@ pub const Response = struct {
         }
 
         const body_data = self.body orelse "";
-        var status_buf: [3]u8 = undefined;
-        const status_str = writeU16(&status_buf, self.status.code());
 
-        out.appendSlice("HTTP/1.1 ") catch return;
-        out.appendSlice(status_str) catch return;
-        out.appendSlice(" ") catch return;
-        out.appendSlice(self.status.phrase()) catch return;
-        out.appendSlice("\r\nServer: blitz\r\n") catch return;
+        // Fast path: 200 OK with exactly 1 header (Content-Type) — covers 90%+ of framework responses
+        if (self.status == .ok and self.headers.len == 1) {
+            const ct = self.headers.entries[0].value;
+            const prefix = if (ct.len == 10 and ct[0] == 't') // text/plain
+                OK_TEXT_PREFIX
+            else if (ct.len == 16 and ct[0] == 'a') // application/json
+                OK_JSON_PREFIX
+            else
+                "";
 
-        // Write headers
-        for (self.headers.entries[0..self.headers.len]) |h| {
-            out.appendSlice(h.name) catch return;
-            out.appendSlice(": ") catch return;
-            out.appendSlice(h.value) catch return;
-            out.appendSlice("\r\n") catch return;
+            if (prefix.len > 0) {
+                var cl_buf: [32]u8 = undefined;
+                const cl_str = writeUsize(&cl_buf, body_data.len);
+                const total = prefix.len + cl_str.len + 4 + body_data.len;
+                out.ensureTotalCapacity(out.items.len + total) catch return;
+                out.appendSliceAssumeCapacity(prefix);
+                out.appendSliceAssumeCapacity(cl_str);
+                out.appendSliceAssumeCapacity("\r\n\r\n");
+                out.appendSliceAssumeCapacity(body_data);
+                return;
+            }
         }
 
-        // Content-Length
+        // General path: build header into stack buffer, then 2 appends
+        var hdr_buf: [4096]u8 = undefined;
+        var pos: usize = 0;
+
+        // Status line
+        const status_prefix = "HTTP/1.1 ";
+        @memcpy(hdr_buf[pos..][0..status_prefix.len], status_prefix);
+        pos += status_prefix.len;
+
+        const code = self.status.code();
+        hdr_buf[pos] = @intCast(code / 100 + '0');
+        hdr_buf[pos + 1] = @intCast((code / 10) % 10 + '0');
+        hdr_buf[pos + 2] = @intCast(code % 10 + '0');
+        pos += 3;
+        hdr_buf[pos] = ' ';
+        pos += 1;
+
+        const phrase = self.status.phrase();
+        @memcpy(hdr_buf[pos..][0..phrase.len], phrase);
+        pos += phrase.len;
+
+        const server_hdr = "\r\nServer: blitz\r\n";
+        @memcpy(hdr_buf[pos..][0..server_hdr.len], server_hdr);
+        pos += server_hdr.len;
+
+        for (self.headers.entries[0..self.headers.len]) |h| {
+            if (pos + h.name.len + h.value.len + 4 > hdr_buf.len) break;
+            @memcpy(hdr_buf[pos..][0..h.name.len], h.name);
+            pos += h.name.len;
+            hdr_buf[pos] = ':';
+            hdr_buf[pos + 1] = ' ';
+            pos += 2;
+            @memcpy(hdr_buf[pos..][0..h.value.len], h.value);
+            pos += h.value.len;
+            hdr_buf[pos] = '\r';
+            hdr_buf[pos + 1] = '\n';
+            pos += 2;
+        }
+
+        const cl_hdr = "Content-Length: ";
+        @memcpy(hdr_buf[pos..][0..cl_hdr.len], cl_hdr);
+        pos += cl_hdr.len;
+
         var cl_buf: [32]u8 = undefined;
-        out.appendSlice("Content-Length: ") catch return;
-        out.appendSlice(writeUsize(&cl_buf, body_data.len)) catch return;
-        out.appendSlice("\r\n\r\n") catch return;
-        out.appendSlice(body_data) catch return;
+        const cl_str = writeUsize(&cl_buf, body_data.len);
+        @memcpy(hdr_buf[pos..][0..cl_str.len], cl_str);
+        pos += cl_str.len;
+
+        hdr_buf[pos] = '\r';
+        hdr_buf[pos + 1] = '\n';
+        hdr_buf[pos + 2] = '\r';
+        hdr_buf[pos + 3] = '\n';
+        pos += 4;
+
+        out.ensureTotalCapacity(out.items.len + pos + body_data.len) catch return;
+        out.appendSliceAssumeCapacity(hdr_buf[0..pos]);
+        out.appendSliceAssumeCapacity(body_data);
     }
 };
 

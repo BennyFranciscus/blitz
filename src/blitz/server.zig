@@ -428,9 +428,15 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
 
                 // Flush writes
                 if (st.write_list.items.len > st.write_off) {
-                    const written = posix.write(fd, st.write_list.items[st.write_off..]) catch blk: {
+                    const written = posix.write(fd, st.write_list.items[st.write_off..]) catch |err| blk: {
+                        if (err == error.WouldBlock) {
+                            // Send buffer full — register for EPOLLOUT and retry later
+                            var mev = linux.epoll_event{ .events = linux.EPOLL.IN | linux.EPOLL.OUT | linux.EPOLL.ET, .data = .{ .fd = fd } };
+                            posix.epoll_ctl(epfd, linux.EPOLL.CTL_MOD, fd, &mev) catch {};
+                            break :blk @as(usize, 0);
+                        }
                         should_close = true;
-                        break :blk 0;
+                        break :blk @as(usize, 0);
                     };
                     st.write_off += written;
                     if (st.write_off >= st.write_list.items.len) {

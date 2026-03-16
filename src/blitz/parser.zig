@@ -38,28 +38,40 @@ pub fn parse(data: []const u8) ?ParseResult {
         query = uri[qp + 1 ..];
     }
 
-    // Parse headers
+    // Parse headers — manual loop for performance (avoids iterator overhead)
     var headers = Headers{};
     var content_length: ?usize = null;
     var chunked = false;
 
-    var line_it = mem.splitSequence(u8, hdr[req_end + 2 ..], "\r\n");
-    while (line_it.next()) |line| {
-        if (line.len == 0) continue;
-        const colon = mem.indexOfScalar(u8, line, ':') orelse continue;
-        const name = line[0..colon];
-        const value = mem.trimLeft(u8, line[colon + 1 ..], " ");
+    {
+        const hdr_data = hdr[req_end + 2 ..];
+        var pos2: usize = 0;
+        while (pos2 < hdr_data.len) {
+            const remaining = hdr_data[pos2..];
+            const line_end_opt = mem.indexOf(u8, remaining, "\r\n");
+            const line_end = line_end_opt orelse remaining.len;
+            if (line_end == 0) {
+                pos2 += 2;
+                continue;
+            }
+            const line = remaining[0..line_end];
+            pos2 += line_end + (if (line_end_opt != null) @as(usize, 2) else line_end);
 
-        headers.append(name, value);
+            const colon = mem.indexOfScalar(u8, line, ':') orelse continue;
+            const name = line[0..colon];
+            const value = mem.trimLeft(u8, line[colon + 1 ..], " ");
 
-        // Check Content-Length
-        if (name.len == 14 and types.asciiEqlIgnoreCase(name, "Content-Length")) {
-            content_length = std.fmt.parseInt(usize, value, 10) catch null;
-        }
-        // Check Transfer-Encoding
-        if (name.len == 17 and types.asciiEqlIgnoreCase(name, "Transfer-Encoding")) {
-            if (value.len >= 7 and types.asciiEqlIgnoreCase(value[0..7], "chunked")) {
-                chunked = true;
+            headers.append(name, value);
+
+            // Check Content-Length (fast first-char check)
+            if (name.len == 14 and (name[0] == 'C' or name[0] == 'c') and types.asciiEqlIgnoreCase(name, "Content-Length")) {
+                content_length = std.fmt.parseInt(usize, value, 10) catch null;
+            }
+            // Check Transfer-Encoding
+            else if (name.len == 17 and (name[0] == 'T' or name[0] == 't') and types.asciiEqlIgnoreCase(name, "Transfer-Encoding")) {
+                if (value.len >= 7 and types.asciiEqlIgnoreCase(value[0..7], "chunked")) {
+                    chunked = true;
+                }
             }
         }
     }
