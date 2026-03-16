@@ -5,6 +5,8 @@ const blitz = @import("blitz.zig");
 // ── Global pre-computed responses ───────────────────────────────────
 var dataset_json_resp: []const u8 = "";
 var dataset_gzip_resp: []const u8 = "";
+var compression_json_resp: []const u8 = "";
+var compression_gzip_resp: []const u8 = "";
 
 const StaticFile = struct {
     name: []const u8,
@@ -47,12 +49,12 @@ fn handleCompression(req: *blitz.Request, res: *blitz.Response) void {
     // Check if client accepts gzip
     if (req.headers.get("Accept-Encoding")) |ae| {
         if (mem.indexOf(u8, ae, "gzip") != null) {
-            _ = res.rawResponse(dataset_gzip_resp);
+            _ = res.rawResponse(compression_gzip_resp);
             return;
         }
     }
     // Fallback: uncompressed JSON
-    _ = res.rawResponse(dataset_json_resp);
+    _ = res.rawResponse(compression_json_resp);
 }
 
 fn handleUpload(req: *blitz.Request, res: *blitz.Response) void {
@@ -322,8 +324,12 @@ fn getContentType(name: []const u8) []const u8 {
 // ── Main ────────────────────────────────────────────────────────────
 
 pub fn main() !void {
-    // Load data
+    // Load data — large dataset for /compression, small for /json
+    // loadDataset() sets dataset_gzip_resp as a side effect
+    compression_json_resp = loadDataset("/data/dataset-large.json");
+    compression_gzip_resp = dataset_gzip_resp;
     dataset_json_resp = loadDataset("/data/dataset.json");
+    // dataset_gzip_resp now has the small dataset gzip (used by /json if needed)
     loadStaticFiles();
 
     // Set up router
