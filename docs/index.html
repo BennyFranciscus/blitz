@@ -32,6 +32,7 @@
 
     <div class="section-label">Features</div>
     <a href="#json-builder">JSON Builder</a>
+    <a href="#json-parsing">JSON Parsing</a>
     <a href="#query-parsing">Query Parsing</a>
     <a href="#body-parsing">Body Parsing</a>
     <a href="#cookies">Cookies</a>
@@ -289,6 +290,69 @@ arr.push(@as(i64, 3));
 const list = arr.finish() orelse "[]";</code></pre>
 
   <p>Supports: structs, slices, ints, floats, bools, strings, optionals (null fields skipped), enums (as strings).</p>
+</section>
+
+<!-- ─── JSON Parsing ─── -->
+<section id="json-parsing">
+  <h2>JSON Parsing</h2>
+  <p>Comptime-powered JSON deserialization — parse request bodies directly into Zig structs. Zero-copy strings (slices into the original JSON input).</p>
+
+  <h3>Basic Usage</h3>
+  <pre><code>const CreateUser = struct {
+    name: []const u8,
+    email: []const u8,
+    age: i64,
+};
+
+fn createUser(req: *blitz.Request, res: *blitz.Response) void {
+    const user = req.jsonParse(CreateUser) orelse {
+        blitz.badRequest(res, "Invalid JSON body");
+        return;
+    };
+    // user.name, user.email, user.age are ready to use
+    _ = res.setStatus(.created).json("{\"created\":true}");
+}</code></pre>
+
+  <h3>Optional Fields &amp; Defaults</h3>
+  <pre><code>const UpdateUser = struct {
+    name: ?[]const u8 = null,     // missing key → null
+    age: ?i64 = null,             // explicit null → null
+    role: []const u8 = "user",    // missing key → "user"
+};
+
+const update = req.jsonParse(UpdateUser) orelse return;
+if (update.name) |name| { /* name was provided */ }</code></pre>
+
+  <h3>Nested Structs</h3>
+  <pre><code>const Address = struct { city: []const u8, zip: []const u8 };
+const Person = struct { name: []const u8, address: Address };
+
+// Parses: {"name":"Alice","address":{"city":"NYC","zip":"10001"}}
+const person = req.jsonParse(Person) orelse return;</code></pre>
+
+  <h3>Enums</h3>
+  <pre><code>const Status = enum { active, inactive, pending };
+const Filter = struct { status: Status };
+
+// Parses: {"status":"active"}
+const filter = req.jsonParse(Filter) orelse return;</code></pre>
+
+  <h3>JSON Arrays</h3>
+  <pre><code>const IntList = blitz.JsonArrayParser(i64, 32);  // max 32 items
+const nums = IntList.parse("[1, 2, 3, 4, 5]") orelse return;
+for (nums.slice()) |n| { /* ... */ }
+
+// Array of structs
+const Item = struct { id: i64, name: []const u8 };
+const Items = blitz.JsonArrayParser(Item, 16);
+const items = Items.parse(req.body orelse "[]") orelse return;</code></pre>
+
+  <h3>Standalone Parsing</h3>
+  <pre><code>// Parse any JSON string (not just request bodies)
+const Config = struct { host: []const u8, port: i64 };
+const cfg = blitz.JsonParser.parse(Config, json_string) orelse return;</code></pre>
+
+  <p>Unknown JSON keys are silently skipped. Escaped strings (\n, \t, \uXXXX, etc.) are unescaped automatically.</p>
 </section>
 
 <!-- ─── Query Parsing ─── -->

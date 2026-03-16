@@ -128,6 +128,19 @@ fn searchPosts(req: *blitz.Request, res: *blitz.Response) void {
 
 // ── Protected Handlers (require auth) ──────────────────────────────
 
+// Request body types for JSON parsing
+const CreatePostBody = struct {
+    title: []const u8,
+    content: []const u8 = "",
+    published: bool = false,
+};
+
+const UpdatePostBody = struct {
+    title: ?[]const u8 = null,
+    content: ?[]const u8 = null,
+    published: ?bool = null,
+};
+
 fn createPost(req: *blitz.Request, res: *blitz.Response) void {
     // Rate limit write operations more aggressively
     const ip = blitz.clientIp(req);
@@ -136,13 +149,21 @@ fn createPost(req: *blitz.Request, res: *blitz.Response) void {
         return;
     }
 
-    if (req.body == null or req.body.?.len == 0) {
-        blitz.badRequest(res, "Request body required");
+    // Parse JSON body into typed struct
+    const post = req.jsonParse(CreatePostBody) orelse {
+        blitz.badRequest(res, "Invalid JSON body — requires 'title' field");
         return;
-    }
+    };
 
-    // In a real app: parse JSON body, validate, insert into DB
-    _ = res.setStatus(.created).json("{\"id\":3,\"created\":true}");
+    // In a real app: validate and insert into DB
+    var buf: [512]u8 = undefined;
+    const body = blitz.Json.stringify(&buf, .{
+        .id = @as(i64, 3),
+        .title = post.title,
+        .published = post.published,
+        .created = true,
+    }) orelse "{\"id\":3,\"created\":true}";
+    _ = res.setStatus(.created).json(body);
 }
 
 fn updatePost(req: *blitz.Request, res: *blitz.Response) void {
@@ -150,18 +171,27 @@ fn updatePost(req: *blitz.Request, res: *blitz.Response) void {
         blitz.badRequest(res, "Missing post ID");
         return;
     };
-    _ = std.fmt.parseInt(i64, id_str, 10) catch {
+    const id = std.fmt.parseInt(i64, id_str, 10) catch {
         blitz.badRequest(res, "Invalid post ID");
         return;
     };
 
-    if (req.body == null or req.body.?.len == 0) {
-        blitz.badRequest(res, "Request body required");
+    // Parse JSON body with optional fields (partial update)
+    const update = req.jsonParse(UpdatePostBody) orelse {
+        blitz.badRequest(res, "Invalid JSON body");
         return;
-    }
+    };
 
-    // In a real app: validate, update in DB
-    _ = res.json("{\"updated\":true}");
+    // In a real app: apply non-null fields to DB record
+    var buf: [512]u8 = undefined;
+    const body = blitz.Json.stringify(&buf, .{
+        .id = id,
+        .title_updated = update.title != null,
+        .content_updated = update.content != null,
+        .published_updated = update.published != null,
+        .updated = true,
+    }) orelse "{\"updated\":true}";
+    _ = res.json(body);
 }
 
 fn deletePost(req: *blitz.Request, res: *blitz.Response) void {

@@ -49,6 +49,7 @@ pub const spsc_mod = @import("blitz/spsc.zig");
 pub const simd_mod = @import("blitz/simd.zig");
 pub const cors_mod = @import("blitz/cors.zig");
 pub const ratelimit_mod = @import("blitz/ratelimit.zig");
+pub const json_parse_mod = @import("blitz/json_parse.zig");
 
 // Re-export main types for convenience
 pub const Request = types.Request;
@@ -164,6 +165,11 @@ pub const SpscQueue = spsc_mod.SpscQueue;
 pub const Cors = cors_mod;
 pub const CorsConfig = cors_mod.CorsConfig;
 
+// JSON Parsing
+pub const JsonParser = json_parse_mod.JsonParser;
+pub const JsonArrayParser = json_parse_mod.JsonArray;
+pub const parseJson = json_parse_mod.parseJson;
+
 // Rate Limiting
 pub const RateLimit = ratelimit_mod;
 pub const RateLimiter = ratelimit_mod.RateLimiter;
@@ -186,4 +192,5 @@ test {
     _ = @import("blitz/simd.zig");
     _ = @import("blitz/cors.zig");
     _ = @import("blitz/ratelimit.zig");
+    _ = @import("blitz/json_parse.zig");
 }

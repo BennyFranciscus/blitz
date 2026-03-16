@@ -157,21 +157,24 @@ pub const RateLimiter = struct {
         return null; // shouldn't happen with probes > 0
     }
 
-    fn hashIp(ip: []const u8) usize {
-        // FNV-1a hash
-        var h: u64 = 0xcbf29ce484222325;
-        for (ip) |b| {
-            h ^= b;
-            h *%= 0x100000001b3;
-        }
-        return @intCast(h);
-    }
-
-    fn nowSecs() i64 {
-        const ts = std.posix.clock_gettime(.MONOTONIC) catch return 0;
-        return ts.sec;
-    }
 };
+
+// ── Shared utility functions ────────────────────────────────────────
+
+fn hashIp(ip: []const u8) usize {
+    // FNV-1a hash
+    var h: u64 = 0xcbf29ce484222325;
+    for (ip) |b| {
+        h ^= b;
+        h *%= 0x100000001b3;
+    }
+    return @intCast(h);
+}
+
+fn nowSecs() i64 {
+    const ts = std.posix.clock_gettime(.MONOTONIC) catch return 0;
+    return ts.sec;
+}
 
 /// Extract client IP from request headers.
 /// Checks X-Forwarded-For, X-Real-IP, then falls back to "unknown".

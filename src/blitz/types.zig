@@ -8,6 +8,7 @@ const ContentType = body_mod.ContentType;
 const MultipartResult = body_mod.MultipartResult;
 const cookie_mod = @import("cookie.zig");
 const CookieJar = cookie_mod.CookieJar;
+const json_parse = @import("json_parse.zig");
 
 // ── HTTP Method ─────────────────────────────────────────────────────
 pub const Method = enum {
@@ -189,6 +190,18 @@ pub const Request = struct {
     pub fn contentType(self: *const Request) ContentType {
         const ct = self.headers.get("Content-Type") orelse return .unknown;
         return body_mod.detectContentType(ct);
+    }
+
+    /// Parse request body as JSON into a comptime-known struct type.
+    /// Zero-copy strings (slices into body). Returns null if body is missing or JSON is invalid.
+    ///
+    /// Example:
+    ///   const User = struct { name: []const u8, age: i64, active: bool };
+    ///   if (req.jsonParse(User)) |user| {
+    ///       // user.name, user.age, user.active are set
+    ///   }
+    pub fn jsonParse(self: *const Request, comptime T: type) ?T {
+        return json_parse.parseJson(T, self.body);
     }
 
     /// Parse request body as multipart/form-data.

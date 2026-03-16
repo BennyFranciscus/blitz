@@ -19,7 +19,7 @@
 - 🧠 **Zero-copy HTTP parsing** — request data stays in the read buffer, no allocations in the hot path
 - ⚙️ **Dual backend** — epoll (default) or io_uring with multishot accept, buffer rings, and zero-copy send
 - 🌳 **Radix-trie router** — path params, wildcards, route groups, per-route middleware
-- 📦 **Batteries included** — JSON builder, cookies, compression, CORS, rate limiting, WebSocket, static files
+- 📦 **Batteries included** — JSON serialization + parsing, cookies, compression, CORS, rate limiting, WebSocket, static files
 - 🔌 **Graceful shutdown** — SIGTERM/SIGINT handling, connection draining, Docker-ready
 - 📝 **Structured logging** — text or JSON format, latency tracking, slow request detection
 
@@ -81,7 +81,7 @@ Tested on [HttpArena](https://github.com/MDA2AV/HttpArena) — 64-core AMD Threa
 
 ```bash
 zig build -Doptimize=ReleaseFast    # build
-zig build test                       # 218 unit tests
+zig build test                       # 270 unit tests
 
 # Run with epoll (default)
 ./zig-out/bin/blitz
