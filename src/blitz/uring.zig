@@ -11,6 +11,7 @@ const parser = @import("parser.zig");
 const Router = @import("router.zig").Router;
 const compress_mod = @import("compress.zig");
 const log_mod = @import("log.zig");
+const websocket = @import("websocket.zig");
 const SpscQueue = @import("spsc.zig").SpscQueue;
 const Request = types.Request;
 const Response = types.Response;
@@ -100,6 +101,8 @@ const ConnState = struct {
     discard_req: ?parser.HeaderResult = null, // parsed request headers
     dyn_len: usize = 0,
     dyn_alloc: ?std.mem.Allocator = null,
+    // WebSocket mode — after upgrade, bypass HTTP parsing
+    ws_mode: bool = false,
 
     fn init(alloc: std.mem.Allocator) ConnState {
         return .{ .write_buf = std.ArrayList(u8).init(alloc) };
@@ -162,6 +165,7 @@ const ConnState = struct {
         self.discard_remaining = 0;
         self.discard_header_len = 0;
         self.discard_req = null;
+        self.ws_mode = false;
     }
 
     fn isDiscarding(self: *const ConnState) bool {
@@ -699,6 +703,90 @@ fn reactorThread(
                         continue;
                     }
 
+                    // WebSocket mode — echo frames instead of HTTP parsing
+                    if (st.ws_mode) {
+                        // Copy recv data into connection buffer
+                        const ws_space = st.read_buf.len - st.read_len;
+                        const ws_copy_len = @min(recv_data.len, ws_space);
+                        @memcpy(st.read_buf[st.read_len..][0..ws_copy_len], recv_data[0..ws_copy_len]);
+                        st.read_len += ws_copy_len;
+
+                        // Return buffer to kernel
+                        buf_group.put_cqe(cqe) catch {};
+
+                        // Parse and echo WebSocket frames
+                        var ws_off: usize = 0;
+                        var ws_close = false;
+                        while (ws_off < st.read_len) {
+                            const ws_parse = websocket.parseFrame(st.read_buf[ws_off..st.read_len]) orelse break;
+                            const frame = ws_parse.frame;
+                            switch (frame.opcode) {
+                                .text, .binary => {
+                                    var ws_frame_buf: [65536 + 14]u8 = undefined;
+                                    if (websocket.buildFrame(&ws_frame_buf, frame.opcode, frame.payload, frame.fin)) |echo_frame| {
+                                        st.write_buf.appendSlice(echo_frame) catch {};
+                                    }
+                                },
+                                .ping => {
+                                    var pong_buf: [131]u8 = undefined;
+                                    if (websocket.buildFrame(&pong_buf, .pong, frame.payload, true)) |pong_frame| {
+                                        st.write_buf.appendSlice(pong_frame) catch {};
+                                    }
+                                },
+                                .close => {
+                                    var close_buf: [131]u8 = undefined;
+                                    if (websocket.buildCloseFrame(&close_buf, .normal, "")) |close_frame| {
+                                        st.write_buf.appendSlice(close_frame) catch {};
+                                    }
+                                    ws_close = true;
+                                },
+                                else => {},
+                            }
+                            ws_off += ws_parse.consumed;
+                        }
+
+                        // Compact read buffer
+                        if (ws_off > 0) {
+                            const ws_rem = st.read_len - ws_off;
+                            if (ws_rem > 0) {
+                                std.mem.copyForwards(u8, st.read_buf[0..ws_rem], st.read_buf[ws_off..st.read_len]);
+                            }
+                            st.read_len = ws_rem;
+                        }
+
+                        // Submit send if data ready
+                        if (st.write_buf.items.len > st.write_off and !st.send_inflight) {
+                            const send_data = st.write_buf.items[st.write_off..];
+                            if (send_zc_state != 2) {
+                                armSendZc(&ring, cqe_gen, fd, send_data) catch {
+                                    armSend(&ring, cqe_gen, fd, send_data) catch {};
+                                };
+                            } else {
+                                armSend(&ring, cqe_gen, fd, send_data) catch {};
+                            }
+                            st.send_inflight = true;
+                            needs_submit = true;
+                        }
+
+                        if (ws_close) {
+                            // Flush close frame then close connection
+                            if (st.write_buf.items.len > st.write_off and !st.send_inflight) {
+                                const send_data2 = st.write_buf.items[st.write_off..];
+                                armSend(&ring, cqe_gen, fd, send_data2) catch {};
+                                st.send_inflight = true;
+                                needs_submit = true;
+                            }
+                            // Close after send completes (send handler will see ws_close flag)
+                            // For simplicity, close immediately — close frame already queued
+                            closeConn(&conns, &conn_gens, &pool_opt, &ring, fd, alloc, false);
+                            active_conns -|= 1;
+                        } else if (!has_more) {
+                            _ = buf_group.recv_multishot(packUserData(.recv, cqe_gen, fd), fd, 0) catch {};
+                            needs_submit = true;
+                        }
+                        continue;
+                    }
+
                     // Normal mode — copy recv data into connection buffer
                     if (st.dyn_buf) |dbuf| {
                         const space = dbuf.len - st.dyn_len;
@@ -744,6 +832,20 @@ fn reactorThread(
                         if (shutdown_flag.load(.acquire)) resp.headers.set("Connection", "close");
                         const req_start = if (logging) log_mod.now() else 0;
                         router.handle(&req, &resp);
+
+                        // Check if handler upgraded to WebSocket
+                        if (resp.ws_upgraded) {
+                            if (req.headers.get("Sec-WebSocket-Key")) |ws_key| {
+                                var upgrade_buf: [256]u8 = undefined;
+                                if (websocket.buildUpgradeResponse(&upgrade_buf, ws_key, null)) |upgrade_resp| {
+                                    st.write_buf.appendSlice(upgrade_resp) catch {};
+                                }
+                            }
+                            st.ws_mode = true;
+                            off += result.total_len;
+                            break; // stop HTTP parsing — switch to WebSocket mode
+                        }
+
                         if (compression_enabled) _ = compress_mod.compressResponse(&compress_buf, &req, &resp);
                         if (logging) log_mod.logRequest(log_config, &req, &resp, req_start);
                         resp.writeTo(&st.write_buf);
