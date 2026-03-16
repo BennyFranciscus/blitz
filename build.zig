@@ -39,6 +39,21 @@ pub fn build(b: *std.Build) void {
     const rest_step = b.step("rest-api", "Build the REST API example");
     rest_step.dependOn(&install_rest.step);
 
+    // Database example
+    const database = b.addExecutable(.{
+        .name = "database",
+        .root_source_file = b.path("examples/database.zig"),
+        .target = target,
+        .optimize = optimize,
+        .single_threaded = false,
+    });
+    database.root_module.addImport("blitz", blitz_mod);
+    database.linkLibC();
+    database.linkSystemLibrary("sqlite3");
+    const install_database = b.addInstallArtifact(database, .{});
+    const database_step = b.step("database", "Build the database example");
+    database_step.dependOn(&install_database.step);
+
     // HttpArena benchmark server
     const exe = b.addExecutable(.{
         .name = "blitz",
