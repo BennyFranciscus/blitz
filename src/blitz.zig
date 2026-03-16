@@ -45,6 +45,7 @@ pub const compress_mod = @import("blitz/compress.zig");
 pub const log_mod = @import("blitz/log.zig");
 pub const uring_mod = @import("blitz/uring.zig");
 pub const websocket_mod = @import("blitz/websocket.zig");
+pub const spsc_mod = @import("blitz/spsc.zig");
 
 // Re-export main types for convenience
 pub const Request = types.Request;
@@ -152,6 +153,9 @@ pub const asciiEqlIgnoreCase = types.asciiEqlIgnoreCase;
 // Parser
 pub const parse = parser_mod.parse;
 
+// SPSC Queue
+pub const SpscQueue = spsc_mod.SpscQueue;
+
 // Tests (pulled in by `zig build test`)
 test {
     _ = @import("blitz/tests.zig");
@@ -163,4 +167,5 @@ test {
     _ = @import("blitz/compress.zig");
     _ = @import("blitz/log.zig");
     _ = @import("blitz/websocket.zig");
+    _ = @import("blitz/spsc.zig");
 }
