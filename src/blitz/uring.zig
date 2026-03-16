@@ -317,6 +317,12 @@ pub const UringServer = struct {
         const alloc = std.heap.c_allocator;
         const n_reactors = self.config.threads orelse @max(Thread.getCpuCount() catch 1, 1);
 
+        // Probe io_uring availability before committing to this backend
+        {
+            var probe_ring = IoUring.init(32, 0) catch return error.UringNotAvailable;
+            probe_ring.deinit();
+        }
+
         // Create a single listen socket
         const listen_fd: i32 = @intCast(posix.socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0) catch return error.SocketError);
         setSockOptInt(listen_fd, SOL_SOCKET, SO_REUSEPORT, 1);

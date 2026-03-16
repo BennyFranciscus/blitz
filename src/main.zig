@@ -355,7 +355,17 @@ pub fn main() !void {
             .port = 8080,
             .compression = false,
         });
-        try uring_server.listen();
+        uring_server.listen() catch {
+            // io_uring init failed (seccomp/memlock/kernel) — fall back to epoll
+            _ = std.posix.write(2, "uring: init failed, falling back to epoll\n") catch {};
+            var server = blitz.Server.init(&router, .{
+                .port = 8080,
+                .keep_alive_timeout = 0,
+                .compression = false,
+            });
+            try server.listen();
+            return;
+        };
     } else {
         var server = blitz.Server.init(&router, .{
             .port = 8080,
