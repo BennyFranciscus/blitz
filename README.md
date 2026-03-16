@@ -8,7 +8,7 @@ A blazing-fast HTTP/1.1 micro web framework for Zig.
 - **Zero-copy HTTP parsing** — request data stays in the read buffer
 - **Dual backend** — epoll (default) or io_uring for maximum throughput
 - **Epoll + SO_REUSEPORT** — one accept socket per core, no lock contention
-- **io_uring** — multishot accept, kernel-managed buffer ring, registered file descriptors, zero-copy send (`send_zc`), async send (select with `BLITZ_URING=1`)
+- **io_uring** — dedicated acceptor thread + reactor threads with SPSC queue fd handoff, multishot accept, kernel-managed buffer ring, zero-copy send (`send_zc`) (select with `BLITZ_URING=1`)
 - **Pre-computed responses** — bypass serialization for static content
 - **Pipeline batching** — handle multiple HTTP requests per read
 - **Middleware chain** — global and per-route middleware with short-circuit support
@@ -609,13 +609,15 @@ Or use the environment variable with the built-in HttpArena entry:
 BLITZ_URING=1 ./blitz
 ```
 
-**io_uring features used:**
-- **Multishot accept** — single SQE continuously accepts connections
+**io_uring architecture:**
+- **Dedicated acceptor thread** — single io_uring ring with multishot accept, distributes connections round-robin
+- **SPSC queue fd handoff** — lock-free single-producer/single-consumer queue (cache-line aligned) per reactor thread for zero-contention fd distribution
+- **Reactor threads** — each has its own io_uring ring dedicated to recv/send (no accept overhead)
 - **Kernel-managed buffer ring** (`io_uring_buf_ring`) — 4096 pre-allocated recv buffers, zero-SQE buffer recycling via shared memory
-- **Registered file descriptors** — pre-registered fd table eliminates per-IO atomic refcount on `struct file` (auto-fallback to regular fds on older kernels)
 - **Zero-copy send** (`send_zc`) — eliminates kernel buffer copy for response writes (kernel 6.0+, auto-fallback to regular send on older kernels). Buffer lifetime managed via notification CQEs.
 - **Async send** — non-blocking response writes with partial-send resubmission
-- **SINGLE_ISSUER + DEFER_TASKRUN** — reduced kernel overhead (auto-fallback for older kernels)
+- **SINGLE_ISSUER + DEFER_TASKRUN** — reduced kernel overhead on reactor rings (auto-fallback for older kernels)
+- **Connection pooling** — per-reactor pre-allocated ConnState pool (4096 slots) with O(1) acquire/release
 
 **Requirements:** Linux 5.19+ (6.0+ for zero-copy send, 6.1+ for DEFER_TASKRUN). Docker containers need `--privileged` or appropriate seccomp profile.
 
@@ -664,7 +666,8 @@ src/
 │   ├── router.zig     # Radix-trie router with global + per-route middleware, groups, params & wildcards
 │   ├── parser.zig     # Zero-copy HTTP/1.1 request parser
 │   ├── server.zig     # Epoll event loop, connection management, graceful shutdown
-│   ├── uring.zig      # io_uring event loop — multishot accept, buffer ring, registered fds, send_zc, async send
+│   ├── uring.zig      # io_uring backend — acceptor thread + reactor threads, SPSC fd handoff, buffer ring, send_zc
+│   ├── spsc.zig       # Lock-free SPSC queue for cross-thread fd handoff
 │   ├── pool.zig       # Connection pool — pre-allocated ConnState objects (epoll backend)
 │   ├── query.zig      # Query string parser with URL decoding and typed access
 │   ├── json.zig       # Comptime JSON serializer (Json, JsonObject, JsonArray)
@@ -674,7 +677,7 @@ src/
 │   ├── errors.zig     # Structured error responses (sendError, badRequest, etc.)
 │   ├── static.zig     # Static file serving (MIME detection, path security, file reading)
 │   ├── websocket.zig  # WebSocket frames, handshake, close codes (RFC 6455)
-│   └── tests.zig      # Unit tests for all modules (195 tests)
+│   └── tests.zig      # Unit tests for all modules
 ├── main.zig           # HttpArena benchmark entry point
 examples/
 └── hello.zig          # Example app with all features
@@ -697,7 +700,7 @@ examples/
 - **Keep-alive timeout** — timerfd-based idle connection sweep, configurable timeout per server
 - **Response compression** — automatic gzip/deflate using `std.compress.gzip`, fast level for low latency, skips tiny bodies and incompressible types
 - **Graceful shutdown** — self-pipe trick for signal delivery, atomic flag across workers, connection draining with configurable timeout
-- **io_uring backend** — multishot accept, kernel-managed buffer ring (`io_uring_buf_ring`) for zero-SQE recv buffer recycling, registered file descriptors for reduced per-IO overhead, zero-copy send (`send_zc`) for eliminating kernel buffer copies, async send, SINGLE_ISSUER + DEFER_TASKRUN
+- **io_uring backend** — dedicated acceptor thread + reactor threads with lock-free SPSC queue fd handoff (matches ringzero architecture), kernel-managed buffer ring for zero-SQE recv buffer recycling, zero-copy send (`send_zc`), connection pooling per reactor, SINGLE_ISSUER + DEFER_TASKRUN
 
 ## Building
 
