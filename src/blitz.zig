@@ -167,6 +167,7 @@ pub const CorsConfig = cors_mod.CorsConfig;
 // Rate Limiting
 pub const RateLimit = ratelimit_mod;
 pub const RateLimiter = ratelimit_mod.RateLimiter;
+pub const SharedRateLimiter = ratelimit_mod.SharedRateLimiter;
 pub const RateLimitConfig = ratelimit_mod.RateLimitConfig;
 pub const clientIp = ratelimit_mod.clientIp;
 
