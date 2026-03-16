@@ -163,6 +163,75 @@ const ConnState = struct {
     }
 };
 
+// ── Connection Pool for io_uring ─────────────────────────────────────
+// Pre-allocated pool of ConnState objects to avoid malloc/free per connection.
+// Uses a stack-based free list for O(1) acquire/release.
+const URING_POOL_SIZE: usize = 4096;
+
+const UringConnPool = struct {
+    slots: []ConnState,
+    free_stack: []u16, // indices into slots
+    free_count: usize,
+    alloc: std.mem.Allocator,
+
+    fn init(alloc: std.mem.Allocator) ?UringConnPool {
+        const slots = alloc.alloc(ConnState, URING_POOL_SIZE) catch return null;
+        const stack = alloc.alloc(u16, URING_POOL_SIZE) catch {
+            alloc.free(slots);
+            return null;
+        };
+        // Initialize free stack: all slots available (reverse order so 0 is popped first)
+        for (0..URING_POOL_SIZE) |i| {
+            stack[i] = @intCast(URING_POOL_SIZE - 1 - i);
+        }
+        // Initialize all ConnState write_buf ArrayLists
+        for (slots) |*s| {
+            s.* = ConnState.init(alloc);
+        }
+        return .{
+            .slots = slots,
+            .free_stack = stack,
+            .free_count = URING_POOL_SIZE,
+            .alloc = alloc,
+        };
+    }
+
+    fn acquire(self: *UringConnPool) ?*ConnState {
+        if (self.free_count == 0) return null;
+        self.free_count -= 1;
+        const idx = self.free_stack[self.free_count];
+        const st = &self.slots[idx];
+        st.reset();
+        return st;
+    }
+
+    fn release(self: *UringConnPool, st: *ConnState) void {
+        // Calculate index from pointer arithmetic
+        const base = @intFromPtr(self.slots.ptr);
+        const ptr = @intFromPtr(st);
+        const stride = @sizeOf(ConnState);
+        const idx = (ptr - base) / stride;
+        if (idx < URING_POOL_SIZE and self.free_count < URING_POOL_SIZE) {
+            self.free_stack[self.free_count] = @intCast(idx);
+            self.free_count += 1;
+        }
+    }
+
+    fn isPooled(self: *UringConnPool, st: *ConnState) bool {
+        const base = @intFromPtr(self.slots.ptr);
+        const ptr = @intFromPtr(st);
+        return ptr >= base and ptr < base + @sizeOf(ConnState) * URING_POOL_SIZE;
+    }
+
+    fn deinit(self: *UringConnPool) void {
+        for (self.slots) |*s| {
+            s.deinit();
+        }
+        self.alloc.free(self.slots);
+        self.alloc.free(self.free_stack);
+    }
+};
+
 // ── Server Configuration ────────────────────────────────────────────
 pub const Config = struct {
     port: u16 = 8080,
@@ -303,6 +372,12 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
     var conns: [MAX_CONNS]?*ConnState = undefined;
     @memset(&conns, null);
 
+    // Connection pool — pre-allocated ConnState objects for O(1) acquire/release
+    var pool_opt = UringConnPool.init(alloc);
+    defer {
+        if (pool_opt) |*p| p.deinit();
+    }
+
     // Arm multishot accept (direct or regular depending on kernel support)
     if (use_direct_fds) {
         armMultishotAcceptDirect(&ring, sock) catch return;
@@ -354,7 +429,9 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                         }
 
                         if (conn_idx < MAX_CONNS) {
-                            const st = alloc.create(ConnState) catch {
+                            // Try pool first, fall back to heap allocation
+                            const from_pool = if (pool_opt) |*p| p.acquire() else null;
+                            const st: *ConnState = from_pool orelse alloc.create(ConnState) catch {
                                 if (use_direct_fds) {
                                     _ = ring.close_direct(packUserData(.close, @as(i32, res)), @intCast(@as(u32, @bitCast(@as(i32, res))))) catch {};
                                     needs_submit = true;
@@ -363,7 +440,10 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                                 }
                                 continue;
                             };
-                            st.* = ConnState.init(alloc);
+                            // Only init if heap-allocated (pool slots are pre-initialized and reset on acquire)
+                            if (from_pool == null) {
+                                st.* = ConnState.init(alloc);
+                            }
                             conns[conn_idx] = st;
 
                             // Arm multishot recv using buffer group
@@ -372,8 +452,9 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                                 @as(i32, res),
                                 0,
                             ) catch {
-                                st.deinit();
-                                alloc.destroy(st);
+                                if (pool_opt) |*p| {
+                                    if (p.isPooled(st)) { p.release(st); } else { st.deinit(); alloc.destroy(st); }
+                                } else { st.deinit(); alloc.destroy(st); }
                                 conns[conn_idx] = null;
                                 if (use_direct_fds) {
                                     _ = ring.close_direct(packUserData(.close, @as(i32, res)), @intCast(@as(u32, @bitCast(@as(i32, res))))) catch {};
@@ -422,8 +503,9 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                         const uidx: usize = @intCast(@as(u32, @bitCast(fd)));
                         if (uidx < MAX_CONNS) {
                             if (conns[uidx]) |st| {
-                                st.deinit();
-                                alloc.destroy(st);
+                                if (pool_opt) |*p| {
+                                    if (p.isPooled(st)) { p.release(st); } else { st.deinit(); alloc.destroy(st); }
+                                } else { st.deinit(); alloc.destroy(st); }
                                 conns[uidx] = null;
                             }
                             if (use_direct_fds) {
@@ -583,8 +665,9 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                             st.write_off = 0;
 
                             if (shutdown_flag.load(.acquire)) {
-                                st.deinit();
-                                alloc.destroy(st);
+                                if (pool_opt) |*p| {
+                                    if (p.isPooled(st)) { p.release(st); } else { st.deinit(); alloc.destroy(st); }
+                                } else { st.deinit(); alloc.destroy(st); }
                                 conns[uidx] = null;
                                 if (use_direct_fds) {
                                     _ = ring.close_direct(packUserData(.close, fd), @intCast(@as(u32, @bitCast(fd)))) catch {};
@@ -609,8 +692,9 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                             continue;
                         }
                         // Real send error — close connection
-                        st.deinit();
-                        alloc.destroy(st);
+                        if (pool_opt) |*p| {
+                            if (p.isPooled(st)) { p.release(st); } else { st.deinit(); alloc.destroy(st); }
+                        } else { st.deinit(); alloc.destroy(st); }
                         conns[uidx] = null;
                         if (use_direct_fds) {
                             _ = ring.close_direct(packUserData(.close, fd), @intCast(@as(u32, @bitCast(fd)))) catch {};
@@ -651,8 +735,9 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                             st.write_off = 0;
 
                             if (shutdown_flag.load(.acquire)) {
-                                st.deinit();
-                                alloc.destroy(st);
+                                if (pool_opt) |*p| {
+                                    if (p.isPooled(st)) { p.release(st); } else { st.deinit(); alloc.destroy(st); }
+                                } else { st.deinit(); alloc.destroy(st); }
                                 conns[uidx] = null;
                                 if (use_direct_fds) {
                                     _ = ring.close_direct(packUserData(.close, fd), @intCast(@as(u32, @bitCast(fd)))) catch {};
@@ -690,8 +775,9 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
     // Cleanup: close all connections
     for (0..MAX_CONNS) |i| {
         if (conns[i]) |st| {
-            st.deinit();
-            alloc.destroy(st);
+            if (pool_opt) |*p| {
+                if (p.isPooled(st)) { p.release(st); } else { st.deinit(); alloc.destroy(st); }
+            } else { st.deinit(); alloc.destroy(st); }
             conns[i] = null;
             if (use_direct_fds) {
                 _ = ring.close_direct(packUserData(.close, @as(i32, @intCast(i))), @intCast(i)) catch {};
