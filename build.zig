@@ -48,6 +48,7 @@ pub fn build(b: *std.Build) void {
         .single_threaded = false,
     });
     exe.linkLibC();
+    exe.linkSystemLibrary("sqlite3");
     b.installArtifact(exe);
 
     // Run step
@@ -62,6 +63,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    tests.linkLibC();
+    tests.linkSystemLibrary("sqlite3");
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);

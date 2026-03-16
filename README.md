@@ -23,6 +23,7 @@
 - 🔧 **Context injection** — typed application state accessible in every handler via `req.context(T)`
 - 🔌 **Graceful shutdown** — SIGTERM/SIGINT handling, connection draining, Docker-ready
 - 📝 **Structured logging** — text or JSON format, latency tracking, slow request detection
+- 🗄️ **SQLite integration** — zero-overhead C interop wrapper, per-thread connections, prepared statements
 
 ## Quick Start
 
@@ -102,6 +103,45 @@ pub fn main() !void {
 }
 ```
 
+## SQLite
+
+Built-in SQLite wrapper via `@cImport` — zero overhead, per-thread connections:
+
+```zig
+const blitz = @import("blitz");
+
+// Open database (per-thread, no mutex overhead)
+var db = try blitz.SqliteDb.open("/data/app.db", .{
+    .readonly = true,
+    .mmap_size = 64 * 1024 * 1024, // 64MB mmap for faster reads
+});
+defer db.close();
+
+// Prepared statement — reusable across requests
+var stmt = try db.prepare(
+    "SELECT id, name, price FROM items WHERE price BETWEEN ?1 AND ?2 LIMIT 50"
+);
+defer stmt.finalize();
+
+// Bind parameters, iterate rows
+try stmt.bindDouble(1, 10.0);
+try stmt.bindDouble(2, 50.0);
+
+while (try stmt.step()) {
+    const id = stmt.columnInt(0);
+    const name = stmt.columnText(1);  // zero-copy slice, valid until next step/reset
+    const price = stmt.columnDouble(2);
+    // ... process row
+}
+
+stmt.reset(); // reuse with new bindings
+```
+
+Requires `libsqlite3-dev` at build time. Add to `build.zig`:
+```zig
+exe.linkSystemLibrary("sqlite3");
+```
+
 ## Documentation
 
 📖 **[Full API Documentation](https://bennyfranciscus.github.io/blitz/)** — routing, middleware, JSON, WebSocket, compression, and more.
@@ -110,7 +150,7 @@ pub fn main() !void {
 
 ```bash
 zig build -Doptimize=ReleaseFast    # build
-zig build test                       # 279 unit tests
+zig build test                       # 287 unit tests
 
 # Run with epoll (default)
 ./zig-out/bin/blitz

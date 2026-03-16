@@ -45,6 +45,7 @@
     <a href="#error-handling">Error Handling</a>
     <a href="#logging">Logging</a>
     <a href="#graceful-shutdown">Graceful Shutdown</a>
+    <a href="#sqlite">SQLite</a>
 
     <div class="section-label">Advanced</div>
     <a href="#io-uring">io_uring Backend</a>
@@ -768,6 +769,58 @@ fn shutdownAware(req: *blitz.Request, res: *blitz.Response) bool {
     .shutdown_timeout = 30,   // seconds to drain before force-close
 });
 try server.listen(); // Blocks until SIGTERM/SIGINT</code></pre>
+</section>
+
+<!-- ─── SQLite ─── -->
+<section id="sqlite">
+  <h2>SQLite Integration</h2>
+  <p>Built-in SQLite wrapper via <code>@cImport</code> — zero overhead, per-thread connections, prepared statements with typed column access.</p>
+
+  <h3>Opening a Database</h3>
+  <pre><code>const blitz = @import("blitz");
+
+// Open with read-only + mmap for maximum read performance
+var db = try blitz.SqliteDb.open("/data/app.db", .{
+    .readonly = true,
+    .mmap_size = 64 * 1024 * 1024,  // 64MB mmap
+    .wal = true,                      // WAL journal mode
+});</code></pre>
+
+  <h3>Prepared Statements</h3>
+  <pre><code>var stmt = try db.prepare(
+    "SELECT id, name, price FROM items WHERE price BETWEEN ?1 AND ?2 LIMIT 50"
+);
+defer stmt.finalize();
+
+// Bind parameters (1-indexed)
+try stmt.bindDouble(1, min_price);
+try stmt.bindDouble(2, max_price);
+
+// Iterate results
+while (try stmt.step()) {
+    const id = stmt.columnInt(0);      // i64
+    const name = stmt.columnText(1);   // []const u8 (zero-copy, valid until next step/reset)
+    const price = stmt.columnDouble(2); // f64
+    // ... process row
+}
+
+// Reset for reuse (keeps compiled query plan)
+stmt.reset();</code></pre>
+
+  <h3>Column Types</h3>
+  <pre><code>// Type checking
+const col_type = stmt.columnType(0); // .integer, .float, .text, .blob, .null_type
+
+// Null checking
+if (stmt.columnIsNull(3)) { ... }
+
+// Blob data
+const data = stmt.columnBlob(4);  // []const u8</code></pre>
+
+  <h3>Build Setup</h3>
+  <p>Requires <code>libsqlite3-dev</code> at build time:</p>
+  <pre><code>// build.zig
+exe.linkSystemLibrary("sqlite3");</code></pre>
 </section>
 
 <!-- ─── io_uring ─── -->
