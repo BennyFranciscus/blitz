@@ -262,18 +262,31 @@ pub const SharedRateLimiter = struct {
     clients: []SharedClientState,
     config: RateLimitConfig,
 
+    /// Packed state: upper 32 bits = window_start (monotonic secs, u32),
+    /// lower 32 bits = request count. CAS'd together to avoid TOCTOU races
+    /// between window reset and count update.
     const SharedClientState = struct {
         /// First 16 bytes of IP key.
         ip_key: [16]u8 = .{0} ** 16,
         ip_len: u8 = 0,
-        /// Atomic request count in current window.
-        count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
-        /// Atomic window start (monotonic seconds).
-        window_start: std.atomic.Value(i64) = std.atomic.Value(i64).init(0),
+        /// Packed window_start (upper 32) + count (lower 32).
+        state: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
         /// Spinlock for slot initialization (0 = unlocked, 1 = locked).
         lock: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
         /// Whether this slot is occupied.
         occupied: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
+
+        inline fn pack(window: u32, count: u32) u64 {
+            return (@as(u64, window) << 32) | @as(u64, count);
+        }
+
+        inline fn unpackWindow(s: u64) u32 {
+            return @intCast(s >> 32);
+        }
+
+        inline fn unpackCount(s: u64) u32 {
+            return @truncate(s);
+        }
     };
 
     pub fn init(alloc: std.mem.Allocator, config: RateLimitConfig) !SharedRateLimiter {
@@ -291,42 +304,53 @@ pub const SharedRateLimiter = struct {
 
     /// Check if a request from this IP is allowed. Returns remaining requests.
     /// Returns null if rate limited. Thread-safe.
+    ///
+    /// Window reset + count are packed in a single u64 and CAS'd together,
+    /// so no request can slip between a window reset and a count zero.
     pub fn check(self: *SharedRateLimiter, ip: []const u8) ?u32 {
-        const now = nowSecs();
+        const now: u32 = @intCast(@as(u64, @bitCast(nowSecs())) & 0xFFFFFFFF);
         const idx = self.findOrCreate(ip, now) orelse return null;
         const client = &self.clients[idx];
 
-        // Check if window expired — try to reset atomically
-        const ws = client.window_start.load(.acquire);
-        if (now - ws >= self.config.window_secs) {
-            // Try to claim the reset
-            if (client.window_start.cmpxchgStrong(ws, now, .acq_rel, .acquire) == null) {
-                // We won the race — reset count
-                client.count.store(0, .release);
+        while (true) {
+            const cur = client.state.load(.acquire);
+            const ws = SharedClientState.unpackWindow(cur);
+            const count = SharedClientState.unpackCount(cur);
+
+            if (now -% ws >= self.config.window_secs) {
+                // Window expired — try to reset window + count atomically
+                const new_state = SharedClientState.pack(now, 1);
+                if (client.state.cmpxchgWeak(cur, new_state, .acq_rel, .acquire) == null) {
+                    // Won the reset — this request is count=1
+                    return self.config.max_requests - 1;
+                }
+                // Lost race — retry with updated state
+                continue;
             }
-            // If we lost the race, another thread reset it — fall through
-        }
 
-        // Atomically increment count
-        const prev = client.count.fetchAdd(1, .acq_rel);
-        if (prev >= self.config.max_requests) {
-            // Over limit — undo our increment (best-effort, slight overcount is ok)
-            _ = client.count.fetchSub(1, .acq_rel);
-            return null;
-        }
+            if (count >= self.config.max_requests) {
+                return null; // rate limited
+            }
 
-        return self.config.max_requests - prev - 1;
+            // Try to increment count within same window
+            const new_state = SharedClientState.pack(ws, count + 1);
+            if (client.state.cmpxchgWeak(cur, new_state, .acq_rel, .acquire) == null) {
+                return self.config.max_requests - count - 1;
+            }
+            // Lost race — retry
+        }
     }
 
     /// Returns remaining seconds until the window resets for this IP.
     pub fn retryAfter(self: *SharedRateLimiter, ip: []const u8) u32 {
-        const now = nowSecs();
+        const now: u32 = @intCast(@as(u64, @bitCast(nowSecs())) & 0xFFFFFFFF);
         const idx = self.findSlot(ip) orelse return 0;
         const client = &self.clients[idx];
-        const ws = client.window_start.load(.acquire);
-        const elapsed = now - ws;
+        const cur = client.state.load(.acquire);
+        const ws = SharedClientState.unpackWindow(cur);
+        const elapsed = now -% ws;
         if (elapsed >= self.config.window_secs) return 0;
-        return @intCast(self.config.window_secs - @as(u32, @intCast(elapsed)));
+        return self.config.window_secs - elapsed;
     }
 
     fn findSlot(self: *SharedRateLimiter, ip: []const u8) ?usize {
@@ -352,7 +376,7 @@ pub const SharedRateLimiter = struct {
         return null;
     }
 
-    fn findOrCreate(self: *SharedRateLimiter, ip: []const u8, now: i64) ?usize {
+    fn findOrCreate(self: *SharedRateLimiter, ip: []const u8, now: u32) ?usize {
         var key: [16]u8 = .{0} ** 16;
         const klen: u8 = @intCast(@min(ip.len, 16));
         @memcpy(key[0..klen], ip[0..klen]);
@@ -362,7 +386,7 @@ pub const SharedRateLimiter = struct {
         var i: usize = hash % cap;
         var probes: usize = 0;
         var oldest_idx: ?usize = null;
-        var oldest_time: i64 = std.math.maxInt(i64);
+        var oldest_time: u32 = std.math.maxInt(u32);
 
         while (probes < 16) : ({
             i = (i + 1) % cap;
@@ -383,8 +407,7 @@ pub const SharedRateLimiter = struct {
                     // Won the lock — initialize
                     c.ip_key = key;
                     c.ip_len = klen;
-                    c.count.store(0, .release);
-                    c.window_start.store(now, .release);
+                    c.state.store(SharedClientState.pack(now, 0), .release);
                     c.occupied.store(1, .release);
                     c.lock.store(0, .release);
                     return i;
@@ -393,7 +416,7 @@ pub const SharedRateLimiter = struct {
             }
 
             // Track oldest for eviction
-            const ws = c.window_start.load(.acquire);
+            const ws = SharedClientState.unpackWindow(c.state.load(.acquire));
             if (ws < oldest_time) {
                 oldest_time = ws;
                 oldest_idx = i;
@@ -406,8 +429,7 @@ pub const SharedRateLimiter = struct {
             if (c.lock.cmpxchgStrong(0, 1, .acq_rel, .acquire) == null) {
                 c.ip_key = key;
                 c.ip_len = klen;
-                c.count.store(0, .release);
-                c.window_start.store(now, .release);
+                c.state.store(SharedClientState.pack(now, 0), .release);
                 c.occupied.store(1, .release);
                 c.lock.store(0, .release);
                 return oi;
