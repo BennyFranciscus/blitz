@@ -290,6 +290,47 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                 // Labeled drain loop: after dynamic buffer promotion,
                 // we must re-read immediately (edge-triggered epoll won't fire again).
                 drain: while (true) {
+                    // Body discard mode — drain socket without buffering
+                    if (st.isDiscarding()) {
+                        var discard_buf: [65536]u8 = undefined;
+                        while (st.discard_remaining > 0) {
+                            const to_read = @min(discard_buf.len, st.discard_remaining);
+                            const n_read = posix.read(fd, discard_buf[0..to_read]) catch |err| {
+                                if (err == error.WouldBlock) break;
+                                should_close = true;
+                                break;
+                            };
+                            if (n_read == 0) {
+                                should_close = true;
+                                break;
+                            }
+                            st.discardBytes(n_read);
+                        }
+
+                        if (st.discardComplete()) {
+                            if (st.finishDiscard()) |hdr_result| {
+                                var req = hdr_result.request;
+                                var res = Response{};
+                                if (shutdown_flag.load(.acquire)) {
+                                    res.headers.set("Connection", "close");
+                                }
+                                const logging = log_config.enabled;
+                                const req_start = if (logging) log_mod.now() else 0;
+                                router.handle(&req, &res);
+                                if (compression_enabled) {
+                                    var compress_buf2: [COMPRESS_BUF_SIZE]u8 = undefined;
+                                    _ = compress_mod.compressResponse(&compress_buf2, &req, &res);
+                                }
+                                if (logging) {
+                                    log_mod.logRequest(log_config, &req, &res, req_start);
+                                }
+                                res.writeTo(&st.write_list);
+                                st.touch();
+                            }
+                        }
+                        break;
+                    }
+
                     // Read into active buffer (static or dynamic)
                     while (true) {
                         const rem_buf = st.readBufRemaining() orelse break;
@@ -316,23 +357,17 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                     const cur_data = st.readSlice();
                     while (off < cur_len) {
                         const result = parser.parse(cur_data[off..cur_len]) orelse {
-                            // Distinguish incomplete data from bad request:
-                            // If we can see complete headers (\r\n\r\n) but parse failed,
-                            // check if it needs dynamic buffer promotion for large bodies.
                             const remaining = cur_data[off..cur_len];
                             if (mem.indexOf(u8, remaining, "\r\n\r\n")) |hdr_end| {
-                                // Headers complete — check if large body needs promotion
-                                const cl = detectContentLength(remaining[0 .. hdr_end + 4]);
-                                if (cl != null and cl.? > BUF_SIZE and st.dyn_buf == null) {
-                                    // Promote to dynamic buffer for large body
-                                    const total_needed = hdr_end + 4 + cl.?;
-                                    if (st.promoteToDynamic(alloc, total_needed)) {
-                                        continue :drain; // Re-read from socket immediately!
+                                // Try body discard for large bodies
+                                const hdr_data = remaining[0 .. hdr_end + 4];
+                                if (parser.parseHeaders(hdr_data)) |hdr_result| {
+                                    if (hdr_result.content_length != null and hdr_result.content_length.? > BUF_SIZE) {
+                                        const body_bytes_in_buf = cur_len - off - (hdr_end + 4);
+                                        st.enterDiscardMode(hdr_result, body_bytes_in_buf);
+                                        off = cur_len;
+                                        continue :drain; // Re-enter drain to discard remaining body bytes
                                     }
-                                }
-                                // If dynamic buffer active but body still incomplete, wait
-                                if (st.dyn_buf != null) {
-                                    break;
                                 }
                                 // Genuinely bad request — send 400
                                 const bad_resp = "HTTP/1.1 400 Bad Request\r\nServer: blitz\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request";
@@ -371,7 +406,7 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                         off += result.total_len;
                     }
 
-                    if (off > 0) {
+                    if (off > 0 and !st.isDiscarding()) {
                         if (st.dyn_buf != null) {
                             // Done with large body — revert to static buffer
                             const rem = st.dyn_len - off;

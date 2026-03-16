@@ -2122,3 +2122,104 @@ test "server detectContentLength zero" {
     try testing.expect(cl != null);
     try testing.expectEqual(@as(usize, 0), cl.?);
 }
+
+// ── Parser content_length Tests ─────────────────────────────────────
+
+test "parser content_length in ParseResult" {
+    const data = "POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello";
+    const result = parser_mod.parse(data) orelse unreachable;
+    try testing.expect(result.request.content_length != null);
+    try testing.expectEqual(@as(usize, 5), result.request.content_length.?);
+    try testing.expect(result.request.body != null);
+    try testing.expectEqualStrings("hello", result.request.body.?);
+}
+
+test "parser content_length null when no body" {
+    const data = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    const result = parser_mod.parse(data) orelse unreachable;
+    try testing.expect(result.request.content_length == null);
+    try testing.expect(result.request.body == null);
+}
+
+test "parser parseHeaders basic" {
+    const data = "POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 20971520\r\n\r\n";
+    const result = parser_mod.parseHeaders(data) orelse unreachable;
+    try testing.expect(result.content_length != null);
+    try testing.expectEqual(@as(usize, 20971520), result.content_length.?);
+    try testing.expectEqual(@as(usize, data.len), result.header_len);
+    try testing.expectEqualStrings("/upload", result.request.path);
+    try testing.expect(result.request.body == null);
+    try testing.expect(result.request.content_length != null);
+    try testing.expectEqual(@as(usize, 20971520), result.request.content_length.?);
+}
+
+test "parser parseHeaders incomplete" {
+    const data = "POST /upload HTTP/1.1\r\nHost: localhost\r\n";
+    const result = parser_mod.parseHeaders(data);
+    try testing.expect(result == null);
+}
+
+test "parser parseHeaders no content_length" {
+    const data = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    const result = parser_mod.parseHeaders(data) orelse unreachable;
+    try testing.expect(result.content_length == null);
+    try testing.expectEqualStrings("/", result.request.path);
+}
+
+// ── Body Discard Tests (pool.zig ConnState) ─────────────────────────
+
+test "pool ConnState discard mode basic" {
+    var st = pool_mod.ConnState.init(testing.allocator);
+    defer st.deinit();
+
+    // Not initially discarding
+    try testing.expect(!st.isDiscarding());
+
+    // Parse headers and enter discard mode
+    const headers = "POST /upload HTTP/1.1\r\nContent-Length: 1000\r\n\r\n";
+    const hdr_result = parser_mod.parseHeaders(headers) orelse unreachable;
+    st.enterDiscardMode(hdr_result, 0);
+
+    try testing.expect(st.isDiscarding());
+    try testing.expect(!st.discardComplete());
+
+    // Discard bytes in chunks
+    st.discardBytes(500);
+    try testing.expect(!st.discardComplete());
+    st.discardBytes(500);
+    try testing.expect(st.discardComplete());
+
+    // Finish discard
+    const result = st.finishDiscard();
+    try testing.expect(result != null);
+    try testing.expectEqualStrings("/upload", result.?.request.path);
+    try testing.expect(!st.isDiscarding());
+}
+
+test "pool ConnState discard with initial body bytes" {
+    var st = pool_mod.ConnState.init(testing.allocator);
+    defer st.deinit();
+
+    const headers = "POST /upload HTTP/1.1\r\nContent-Length: 1000\r\n\r\n";
+    const hdr_result = parser_mod.parseHeaders(headers) orelse unreachable;
+    // 200 bytes of body already in the read buffer
+    st.enterDiscardMode(hdr_result, 200);
+
+    try testing.expect(st.isDiscarding());
+    // Should only need 800 more bytes
+    st.discardBytes(800);
+    try testing.expect(st.discardComplete());
+}
+
+test "pool ConnState discard reset clears state" {
+    var st = pool_mod.ConnState.init(testing.allocator);
+    defer st.deinit();
+
+    const headers = "POST /upload HTTP/1.1\r\nContent-Length: 1000\r\n\r\n";
+    const hdr_result = parser_mod.parseHeaders(headers) orelse unreachable;
+    st.enterDiscardMode(hdr_result, 0);
+    try testing.expect(st.isDiscarding());
+
+    st.reset();
+    try testing.expect(!st.isDiscarding());
+}

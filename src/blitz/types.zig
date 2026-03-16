@@ -129,6 +129,8 @@ pub const Request = struct {
     query: ?[]const u8,
     headers: Headers,
     body: ?[]const u8,
+    // Content-Length from headers (available even when body is discarded/streamed)
+    content_length: ?usize = null,
     // Path params filled by router
     params: Params = .{},
     // Raw data for zero-copy access

@@ -69,6 +69,9 @@ fn unpackFd(ud: u64) i32 {
     return @bitCast(@as(u32, @truncate(ud)));
 }
 
+// Body discard threshold — bodies larger than this are counted, not buffered
+const BODY_DISCARD_THRESHOLD: usize = 65536;
+
 // ── Connection state ────────────────────────────────────────────────
 const ConnState = struct {
     read_buf: [65536]u8 = undefined,
@@ -78,6 +81,11 @@ const ConnState = struct {
     send_inflight: bool = false,
     zc_notif_pending: bool = false,
     dyn_buf: ?[]u8 = null,
+
+    // Body discard mode — count body bytes without buffering
+    discard_remaining: usize = 0, // bytes of body still expected
+    discard_header_len: usize = 0, // header_len for offset tracking
+    discard_req: ?parser.HeaderResult = null, // parsed request headers
     dyn_len: usize = 0,
     dyn_alloc: ?std.mem.Allocator = null,
 
@@ -139,6 +147,43 @@ const ConnState = struct {
         self.write_off = 0;
         self.send_inflight = false;
         self.zc_notif_pending = false;
+        self.discard_remaining = 0;
+        self.discard_header_len = 0;
+        self.discard_req = null;
+    }
+
+    fn isDiscarding(self: *const ConnState) bool {
+        return self.discard_req != null;
+    }
+
+    fn enterDiscardMode(self: *ConnState, hdr_result: parser.HeaderResult, body_bytes_already_in_buf: usize) void {
+        const cl = hdr_result.content_length orelse 0;
+        self.discard_req = hdr_result;
+        self.discard_header_len = hdr_result.header_len;
+        self.discard_remaining = if (cl > body_bytes_already_in_buf) cl - body_bytes_already_in_buf else 0;
+        // Clear the read buffer — we don't need any of this data
+        self.read_len = 0;
+    }
+
+    fn discardBytes(self: *ConnState, n: usize) void {
+        if (n >= self.discard_remaining) {
+            self.discard_remaining = 0;
+        } else {
+            self.discard_remaining -= n;
+        }
+    }
+
+    fn discardComplete(self: *ConnState) bool {
+        return self.discard_req != null and self.discard_remaining == 0;
+    }
+
+    fn finishDiscard(self: *ConnState) ?parser.HeaderResult {
+        const result = self.discard_req;
+        self.discard_req = null;
+        self.discard_remaining = 0;
+        self.discard_header_len = 0;
+        self.read_len = 0;
+        return result;
     }
 
     fn deinit(self: *ConnState) void {
@@ -535,7 +580,63 @@ fn reactorThread(
                     const uidx: usize = @intCast(@as(u32, @bitCast(fd)));
                     if (uidx < MAX_CONNS) {
                         if (conns[uidx]) |st| {
-                            // Copy recv data into connection buffer
+                            // Body discard mode — just count bytes, don't buffer
+                            if (st.isDiscarding()) {
+                                buf_group.put_cqe(cqe) catch {};
+                                st.discardBytes(recv_data.len);
+
+                                if (st.discardComplete()) {
+                                    // All body bytes received — invoke handler
+                                    if (st.finishDiscard()) |hdr_result| {
+                                        var req = hdr_result.request;
+                                        var resp = Response{};
+
+                                        if (shutdown_flag.load(.acquire)) {
+                                            resp.headers.set("Connection", "close");
+                                        }
+
+                                        const req_start = if (logging) log_mod.now() else 0;
+                                        router.handle(&req, &resp);
+
+                                        if (compression_enabled) {
+                                            _ = compress_mod.compressResponse(&compress_buf, &req, &resp);
+                                        }
+                                        if (logging) {
+                                            log_mod.logRequest(log_config, &req, &resp, req_start);
+                                        }
+
+                                        resp.writeTo(&st.write_buf);
+                                    }
+                                }
+
+                                // Submit send if data ready (after discard complete)
+                                if (st.write_buf.items.len > st.write_off and !st.send_inflight) {
+                                    const send_data = st.write_buf.items[st.write_off..];
+                                    if (send_zc_state != 2) {
+                                        armSendZc(&ring, fd, send_data) catch {
+                                            armSend(&ring, fd, send_data) catch {};
+                                        };
+                                    } else {
+                                        armSend(&ring, fd, send_data) catch {};
+                                    }
+                                    st.send_inflight = true;
+                                    needs_submit = true;
+                                }
+
+                                if (!has_more) {
+                                    if (conns[uidx] != null) {
+                                        _ = buf_group.recv_multishot(
+                                            packUserData(.recv, fd),
+                                            fd,
+                                            0,
+                                        ) catch continue;
+                                        needs_submit = true;
+                                    }
+                                }
+                                continue;
+                            }
+
+                            // Normal mode — copy recv data into connection buffer
                             if (st.dyn_buf) |dbuf| {
                                 const space = dbuf.len - st.dyn_len;
                                 const copy_len = @min(recv_data.len, space);
@@ -559,13 +660,18 @@ fn reactorThread(
                                 const result = parser.parse(cur_data[off..cur_len]) orelse {
                                     const remaining = cur_data[off..cur_len];
                                     if (mem.indexOf(u8, remaining, "\r\n\r\n")) |hdr_end| {
-                                        const cl = detectContentLength(remaining[0 .. hdr_end + 4]);
-                                        if (cl != null and cl.? > 65536 and st.dyn_buf == null) {
-                                            const total_needed = hdr_end + 4 + cl.?;
-                                            _ = st.promoteToDynamic(alloc, total_needed);
-                                            break;
+                                        // Try header-only parse for body discard
+                                        const hdr_data = remaining[0 .. hdr_end + 4];
+                                        if (parser.parseHeaders(hdr_data)) |hdr_result| {
+                                            if (hdr_result.content_length != null and hdr_result.content_length.? > BODY_DISCARD_THRESHOLD) {
+                                                // Enter body discard mode
+                                                const body_bytes_in_buf = cur_len - off - (hdr_end + 4);
+                                                st.enterDiscardMode(hdr_result, body_bytes_in_buf);
+                                                // Adjust off to skip headers + body bytes in buffer
+                                                off = cur_len;
+                                                break;
+                                            }
                                         }
-                                        if (st.dyn_buf != null) break;
                                         const bad_resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request";
                                         st.write_buf.appendSlice(bad_resp) catch {};
                                         off += hdr_end + 4;
@@ -595,7 +701,7 @@ fn reactorThread(
                             }
 
                             // Compact read buffer
-                            if (off > 0) {
+                            if (off > 0 and !st.isDiscarding()) {
                                 if (st.dyn_buf != null) {
                                     const rem = st.dyn_len - off;
                                     if (rem > 0 and rem <= 65536) {

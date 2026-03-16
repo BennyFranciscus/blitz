@@ -46,6 +46,10 @@ fn handleUpload(req: *blitz.Request, res: *blitz.Response) void {
     if (req.body) |body| {
         var nb: [32]u8 = undefined;
         _ = res.textBuf(blitz.writeUsize(&nb, body.len));
+    } else if (req.content_length) |cl| {
+        // Body was discarded (streaming mode) but we know the size
+        var nb: [32]u8 = undefined;
+        _ = res.textBuf(blitz.writeUsize(&nb, cl));
     } else {
         _ = res.text("0");
     }

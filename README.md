@@ -16,6 +16,7 @@ A blazing-fast HTTP/1.1 micro web framework for Zig.
 - **JSON builder** — comptime-powered zero-allocation JSON serialization
 - **Static file serving** — serve files from disk with MIME detection, path traversal protection, and cache control
 - **Query string parsing** — structured typed query params with URL decoding
+- **Body discard mode** — large uploads (>64KB) are counted but not buffered, reducing memory from O(body_size × connections) to near-zero
 - **Connection pooling** — pre-allocated ConnState objects, zero malloc/free per connection
 - **Request body parsing** — URL-encoded forms and multipart/form-data with typed access
 - **Cookie support** — parse request cookies and set response cookies with full RFC 6265 options

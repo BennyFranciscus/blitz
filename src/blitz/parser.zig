@@ -79,6 +79,7 @@ pub fn parse(data: []const u8) ?ParseResult {
                     .query = query,
                     .headers = headers,
                     .body = chunk_body,
+                    .content_length = content_length,
                     .raw_header = hdr,
                 },
                 .total_len = total,
@@ -95,6 +96,7 @@ pub fn parse(data: []const u8) ?ParseResult {
                     .query = query,
                     .headers = headers,
                     .body = chunk_body,
+                    .content_length = content_length,
                     .raw_header = hdr,
                 },
                 .total_len = total,
@@ -112,6 +114,7 @@ pub fn parse(data: []const u8) ?ParseResult {
                 .query = query,
                 .headers = headers,
                 .body = data[body_start .. body_start + cl],
+                .content_length = content_length,
                 .raw_header = hdr,
             },
             .total_len = body_start + cl,
@@ -125,9 +128,75 @@ pub fn parse(data: []const u8) ?ParseResult {
             .query = query,
             .headers = headers,
             .body = null,
+            .content_length = content_length,
             .raw_header = hdr,
         },
         .total_len = body_start,
+    };
+}
+
+/// Parse only headers — returns request with body=null and header_len set.
+/// Used for body discard mode where we don't need to buffer the body.
+/// Returns null if headers aren't complete yet.
+pub const HeaderResult = struct {
+    request: Request,
+    header_len: usize, // bytes consumed by headers (up to and including \r\n\r\n)
+    content_length: ?usize,
+};
+
+pub fn parseHeaders(data: []const u8) ?HeaderResult {
+    const hdr_end = mem.indexOf(u8, data, "\r\n\r\n") orelse return null;
+    // Include the final \r\n of the last header so the line scanner can find it
+    const hdr = data[0 .. hdr_end + 2];
+
+    const req_end = mem.indexOf(u8, hdr, "\r\n") orelse return null;
+    const req_line = hdr[0..req_end];
+
+    const sp1 = mem.indexOfScalar(u8, req_line, ' ') orelse return null;
+    const method_str = req_line[0..sp1];
+    const method = Method.fromString(method_str) orelse return null;
+
+    const rest = req_line[sp1 + 1 ..];
+    const sp2 = mem.indexOfScalar(u8, rest, ' ') orelse return null;
+    const uri = rest[0..sp2];
+
+    var path = uri;
+    var query: ?[]const u8 = null;
+    if (mem.indexOfScalar(u8, uri, '?')) |qp| {
+        path = uri[0..qp];
+        query = uri[qp + 1 ..];
+    }
+
+    var headers = Headers{};
+    var content_length: ?usize = null;
+    var pos: usize = req_end + 2;
+    while (pos < hdr_end + 2) {
+        const line_end = mem.indexOf(u8, hdr[pos..], "\r\n") orelse break;
+        const line = hdr[pos .. pos + line_end];
+        pos += line_end + 2;
+
+        const colon = mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = line[0..colon];
+        const value = mem.trimLeft(u8, line[colon + 1 ..], " ");
+        headers.set(name, value);
+
+        if (name.len == 14 and types.asciiEqlIgnoreCase(name, "Content-Length")) {
+            content_length = std.fmt.parseInt(usize, value, 10) catch null;
+        }
+    }
+
+    return .{
+        .request = .{
+            .method = method,
+            .path = path,
+            .query = query,
+            .headers = headers,
+            .body = null,
+            .content_length = content_length,
+            .raw_header = hdr,
+        },
+        .header_len = hdr_end + 4,
+        .content_length = content_length,
     };
 }
 
