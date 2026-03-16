@@ -82,14 +82,75 @@ const ConnState = struct {
     send_inflight: bool = false,
     zc_notif_pending: bool = false, // true while waiting for send_zc notification CQE
 
+    // Dynamic read buffer for large request bodies (e.g. uploads)
+    dyn_buf: ?[]u8 = null,
+    dyn_len: usize = 0,
+    dyn_alloc: ?std.mem.Allocator = null,
+
     fn init(alloc: std.mem.Allocator) ConnState {
         return .{
             .write_buf = std.ArrayList(u8).init(alloc),
         };
     }
 
-    fn reset(self: *ConnState) void {
+    /// Promote from static buffer to dynamic heap buffer of given size.
+    fn promoteToDynamic(self: *ConnState, a: std.mem.Allocator, needed: usize) bool {
+        const buf = a.alloc(u8, needed) catch return false;
+        if (self.read_len > 0) {
+            @memcpy(buf[0..self.read_len], self.read_buf[0..self.read_len]);
+        }
+        self.dyn_buf = buf;
+        self.dyn_len = self.read_len;
+        self.dyn_alloc = a;
+        return true;
+    }
+
+    /// Free dynamic buffer and revert to static.
+    fn revertToStatic(self: *ConnState) void {
+        if (self.dyn_buf) |buf| {
+            if (self.dyn_alloc) |a| {
+                a.free(buf);
+            }
+        }
+        self.dyn_buf = null;
+        self.dyn_len = 0;
+        self.dyn_alloc = null;
         self.read_len = 0;
+    }
+
+    /// Get the active read slice.
+    fn readSlice(self: *ConnState) []const u8 {
+        if (self.dyn_buf) |buf| return buf[0..self.dyn_len];
+        return self.read_buf[0..self.read_len];
+    }
+
+    /// Get remaining writable portion of active buffer.
+    fn readBufRemaining(self: *ConnState) ?[]u8 {
+        if (self.dyn_buf) |buf| {
+            if (self.dyn_len >= buf.len) return null;
+            return buf[self.dyn_len..];
+        }
+        if (self.read_len >= 65536) return null;
+        return self.read_buf[self.read_len..];
+    }
+
+    /// Advance read position after successful read.
+    fn advanceRead(self: *ConnState, n: usize) void {
+        if (self.dyn_buf != null) {
+            self.dyn_len += n;
+        } else {
+            self.read_len += n;
+        }
+    }
+
+    /// Get active read length.
+    fn activeReadLen(self: *ConnState) usize {
+        if (self.dyn_buf != null) return self.dyn_len;
+        return self.read_len;
+    }
+
+    fn reset(self: *ConnState) void {
+        self.revertToStatic();
         self.write_buf.clearRetainingCapacity();
         self.write_off = 0;
         self.send_inflight = false;
@@ -97,6 +158,7 @@ const ConnState = struct {
     }
 
     fn deinit(self: *ConnState) void {
+        self.revertToStatic();
         self.write_buf.deinit();
     }
 };
@@ -380,19 +442,53 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                     const uidx: usize = @intCast(@as(u32, @bitCast(fd)));
                     if (uidx < MAX_CONNS) {
                         if (conns[uidx]) |st| {
-                            // Copy recv data into connection's read buffer
-                            const space = st.read_buf.len - st.read_len;
-                            const copy_len = @min(recv_data.len, space);
-                            @memcpy(st.read_buf[st.read_len..][0..copy_len], recv_data[0..copy_len]);
-                            st.read_len += copy_len;
+                            // Copy recv data into active buffer (static or dynamic)
+                            if (st.dyn_buf) |dbuf| {
+                                const space = dbuf.len - st.dyn_len;
+                                const copy_len = @min(recv_data.len, space);
+                                @memcpy(dbuf[st.dyn_len..][0..copy_len], recv_data[0..copy_len]);
+                                st.dyn_len += copy_len;
+                            } else {
+                                const space = st.read_buf.len - st.read_len;
+                                const copy_len = @min(recv_data.len, space);
+                                @memcpy(st.read_buf[st.read_len..][0..copy_len], recv_data[0..copy_len]);
+                                st.read_len += copy_len;
+                            }
 
                             // Return buffer to kernel ASAP (zero-SQE — just a memory write!)
                             buf_group.put_cqe(cqe) catch {};
 
                             // Parse and handle pipelined requests
                             var off: usize = 0;
-                            while (off < st.read_len) {
-                                const result = parser.parse(st.read_buf[off..st.read_len]) orelse break;
+                            var close_after_write = false;
+                            const cur_len = st.activeReadLen();
+                            const cur_data = st.readSlice();
+                            while (off < cur_len) {
+                                const result = parser.parse(cur_data[off..cur_len]) orelse {
+                                    // If headers are complete but parse failed, check for large body
+                                    const remaining = cur_data[off..cur_len];
+                                    if (mem.indexOf(u8, remaining, "\r\n\r\n")) |hdr_end| {
+                                        // Check if large body needs promotion
+                                        const cl = detectContentLength(remaining[0 .. hdr_end + 4]);
+                                        if (cl != null and cl.? > 65536 and st.dyn_buf == null) {
+                                            const total_needed = hdr_end + 4 + cl.?;
+                                            _ = st.promoteToDynamic(alloc, total_needed);
+                                            // Wait for next recv CQE to deliver more body data
+                                            break;
+                                        }
+                                        // If dynamic buffer active but body still incomplete, wait
+                                        if (st.dyn_buf != null) {
+                                            break;
+                                        }
+                                        // Genuinely bad request — send 400
+                                        const bad_resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request";
+                                        st.write_buf.appendSlice(bad_resp) catch {};
+                                        off += hdr_end + 4;
+                                        close_after_write = true;
+                                        break;
+                                    }
+                                    break;
+                                };
                                 var req = result.request;
                                 var resp = Response{};
 
@@ -418,9 +514,19 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
 
                             // Compact read buffer
                             if (off > 0) {
-                                const rem = st.read_len - off;
-                                if (rem > 0) std.mem.copyForwards(u8, st.read_buf[0..rem], st.read_buf[off..st.read_len]);
-                                st.read_len = rem;
+                                if (st.dyn_buf != null) {
+                                    // Done with large body — revert to static buffer
+                                    const rem = st.dyn_len - off;
+                                    if (rem > 0 and rem <= 65536) {
+                                        @memcpy(st.read_buf[0..rem], st.dyn_buf.?[off..st.dyn_len]);
+                                    }
+                                    st.revertToStatic();
+                                    st.read_len = if (rem <= 65536) rem else 0;
+                                } else {
+                                    const rem = st.read_len - off;
+                                    if (rem > 0) std.mem.copyForwards(u8, st.read_buf[0..rem], st.read_buf[off..st.read_len]);
+                                    st.read_len = rem;
+                                }
                             }
 
                             // Submit send if we have data and no send in flight
@@ -654,4 +760,26 @@ fn armSendZcEx(ring: *IoUring, fd: i32, data: []const u8, fixed_file: bool) !voi
 fn setSockOptInt(fd: i32, level: i32, optname: u32, val: c_int) void {
     const v = mem.toBytes(val);
     posix.setsockopt(fd, level, optname, &v) catch {};
+}
+
+/// Scan raw header bytes for a Content-Length value.
+fn detectContentLength(headers: []const u8) ?usize {
+    var pos: usize = 0;
+    while (pos < headers.len) {
+        const line_end = mem.indexOf(u8, headers[pos..], "\r\n") orelse headers.len - pos;
+        const line = headers[pos .. pos + line_end];
+        if (line.len > 16) {
+            const colon = mem.indexOfScalar(u8, line, ':') orelse {
+                pos += line_end + 2;
+                continue;
+            };
+            const name = line[0..colon];
+            if (name.len == 14 and types.asciiEqlIgnoreCase(name, "Content-Length")) {
+                const value = mem.trimLeft(u8, line[colon + 1 ..], " ");
+                return std.fmt.parseInt(usize, value, 10) catch null;
+            }
+        }
+        pos += line_end + 2;
+    }
+    return null;
 }

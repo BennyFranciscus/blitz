@@ -20,6 +20,11 @@ pub const ConnState = struct {
     fd: i32 = -1,
     // Keep-alive: timestamp of last activity (monotonic clock, seconds)
     last_active: i64 = 0,
+    // Dynamic read buffer for large request bodies (e.g. uploads)
+    // When Content-Length exceeds BUF_SIZE, we promote to a heap buffer.
+    dyn_buf: ?[]u8 = null,
+    dyn_len: usize = 0,
+    dyn_alloc: ?std.mem.Allocator = null,
 
     pub fn init(alloc: std.mem.Allocator) ConnState {
         return .{ .write_list = std.ArrayList(u8).init(alloc) };
@@ -31,8 +36,65 @@ pub const ConnState = struct {
         self.last_active = ts.sec;
     }
 
-    pub fn reset(self: *ConnState) void {
+    /// Promote from static buffer to dynamic heap buffer of given size.
+    /// Copies existing data from the static buffer.
+    pub fn promoteToDynamic(self: *ConnState, alloc: std.mem.Allocator, needed: usize) bool {
+        const buf = alloc.alloc(u8, needed) catch return false;
+        if (self.read_len > 0) {
+            @memcpy(buf[0..self.read_len], self.read_buf[0..self.read_len]);
+        }
+        self.dyn_buf = buf;
+        self.dyn_len = self.read_len;
+        self.dyn_alloc = alloc;
+        return true;
+    }
+
+    /// Free the dynamic buffer and revert to static.
+    pub fn revertToStatic(self: *ConnState) void {
+        if (self.dyn_buf) |buf| {
+            if (self.dyn_alloc) |alloc| {
+                alloc.free(buf);
+            }
+        }
+        self.dyn_buf = null;
+        self.dyn_len = 0;
+        self.dyn_alloc = null;
         self.read_len = 0;
+    }
+
+    /// Get the active read slice (dynamic if promoted, static otherwise).
+    pub fn readSlice(self: *ConnState) []const u8 {
+        if (self.dyn_buf) |buf| return buf[0..self.dyn_len];
+        return self.read_buf[0..self.read_len];
+    }
+
+    /// Get remaining writable portion of active buffer.
+    pub fn readBufRemaining(self: *ConnState) ?[]u8 {
+        if (self.dyn_buf) |buf| {
+            if (self.dyn_len >= buf.len) return null;
+            return buf[self.dyn_len..];
+        }
+        if (self.read_len >= BUF_SIZE) return null;
+        return self.read_buf[self.read_len..];
+    }
+
+    /// Advance read position after successful read.
+    pub fn advanceRead(self: *ConnState, n: usize) void {
+        if (self.dyn_buf != null) {
+            self.dyn_len += n;
+        } else {
+            self.read_len += n;
+        }
+    }
+
+    /// Get active read length.
+    pub fn activeReadLen(self: *ConnState) usize {
+        if (self.dyn_buf != null) return self.dyn_len;
+        return self.read_len;
+    }
+
+    pub fn reset(self: *ConnState) void {
+        self.revertToStatic();
         self.write_list.clearRetainingCapacity();
         self.write_off = 0;
         self.fd = -1;
@@ -40,6 +102,7 @@ pub const ConnState = struct {
     }
 
     pub fn deinit(self: *ConnState) void {
+        self.revertToStatic();
         self.write_list.deinit();
     }
 };
