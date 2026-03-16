@@ -29,6 +29,25 @@ A blazing-fast HTTP/1.1 micro web framework for Zig.
 - **Structured errors** — consistent JSON error responses out of the box
 - **Clean API** — define routes and handlers, blitz handles the rest
 
+## Installation
+
+Add blitz to your `build.zig.zon`:
+
+```sh
+zig fetch --save "https://github.com/BennyFranciscus/blitz/archive/main.tar.gz"
+```
+
+Then in your `build.zig`:
+
+```zig
+const blitz_dep = b.dependency("blitz", .{
+    .target = target,
+    .optimize = optimize,
+});
+exe.root_module.addImport("blitz", blitz_dep.module("blitz"));
+exe.linkLibC(); // required for signal handling and io_uring
+```
+
 ## Quick Start
 
 ```zig
@@ -705,20 +724,20 @@ examples/
 
 ## Performance
 
-Benchmarked on [HttpArena](https://github.com/MDA2AV/HttpArena) — 64-core AMD Threadripper, dedicated hardware.
+Benchmarked on [HttpArena](https://github.com/MDA2AV/HttpArena) — 64-core AMD Threadripper, dedicated hardware, io_uring backend.
 
-| Profile | Connections | Throughput |
-|---------|------------|------------|
-| Baseline | 4096 | **3.05M** req/s |
-| Pipelined (p=16) | 4096 | **39.7M** req/s |
-| JSON (8.4KB body) | 4096 | **927K** req/s |
-| Upload (20MB body) | 256 | **1,960** req/s |
-| Compression (gzip) | 4096 | **97K** req/s |
-| WebSocket echo | 4096 | **48.9M** msg/s |
-| Noisy (mixed traffic) | 4096 | **2.53M** req/s |
-| Limited-conn (r=10) | 4096 | **2.07M** req/s |
+| Profile | Connections | Throughput | Memory |
+|---------|------------|------------|--------|
+| Baseline | 4096 | **3.06M** req/s | 4.1 GiB |
+| Baseline | 16384 | **2.77M** req/s | 4.2 GiB |
+| Pipelined (p=16) | 4096 | **38.9M** req/s | 4.1 GiB |
+| JSON (8.4KB body) | 16384 | **1.66M** req/s | 3.8 GiB |
+| Upload (20MB body) | 64 | **1,117** req/s | 4.1 GiB |
+| Compression (gzip) | 4096 | **95K** req/s | 4.5 GiB |
+| Noisy (mixed traffic) | 4096 | **1.99M** req/s | 4.1 GiB |
+| Limited-conn (r=10) | 4096 | **1.38M** req/s | 4.1 GiB |
 
-Scales well at high concurrency — baseline holds 2.88M req/s at 16,384 connections.
+**#3 on HttpArena baseline**, behind ringzero (C, io_uring) at 3.43M and h2o (C) at 3.16M. Ahead of nginx (3.03M), hyper/Rust (2.94M), actix/Rust (2.71M), and drogon/C++ (2.25M).
 
 ## Building
 
