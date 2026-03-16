@@ -3,3 +3,4 @@ zig-linux-*/
 zig-linux-x86_64-0.14.0.tar.xz
 zig-linux-x86_64-0.14.0.tar.xz*
 *.o
+Dockerfile.test

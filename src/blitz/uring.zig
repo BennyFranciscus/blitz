@@ -41,6 +41,7 @@ const IORING_SETUP_DEFER_TASKRUN: u32 = 1 << 13; // 6.1+
 
 // CQE flags
 const IORING_CQE_F_MORE: u32 = 1 << 1;
+const IORING_CQE_F_NOTIF: u32 = linux.IORING_CQE_F_NOTIF; // 1 << 3, zero-copy send notification
 
 // Registered file descriptor flag
 const IOSQE_FIXED_FILE: u8 = linux.IOSQE_FIXED_FILE;
@@ -79,6 +80,7 @@ const ConnState = struct {
     // Send state
     write_off: usize = 0,
     send_inflight: bool = false,
+    zc_notif_pending: bool = false, // true while waiting for send_zc notification CQE
 
     fn init(alloc: std.mem.Allocator) ConnState {
         return .{
@@ -91,6 +93,7 @@ const ConnState = struct {
         self.write_buf.clearRetainingCapacity();
         self.write_off = 0;
         self.send_inflight = false;
+        self.zc_notif_pending = false;
     }
 
     fn deinit(self: *ConnState) void {
@@ -213,6 +216,10 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
         ring.register_files_sparse(@intCast(MAX_CONNS)) catch break :blk false;
         break :blk true;
     };
+
+    // send_zc (zero-copy send) — probe on first send, fallback to regular send if kernel < 6.0
+    // State: 0 = untested, 1 = supported, 2 = unsupported
+    var send_zc_state: u8 = 0;
 
     // Allocate recv buffer slab for BufferGroup
     const slab_size: usize = @as(usize, RECV_BUF_COUNT) * @as(usize, RECV_BUF_SIZE);
@@ -418,7 +425,16 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
 
                             // Submit send if we have data and no send in flight
                             if (st.write_buf.items.len > st.write_off and !st.send_inflight) {
-                                armSendEx(&ring, fd, st.write_buf.items[st.write_off..], use_direct_fds) catch {};
+                                const send_data = st.write_buf.items[st.write_off..];
+                                if (send_zc_state != 2) {
+                                    // Try zero-copy send (probe on first attempt)
+                                    armSendZcEx(&ring, fd, send_data, use_direct_fds) catch {
+                                        // send_zc SQE prep failed — fall back to regular send
+                                        armSendEx(&ring, fd, send_data, use_direct_fds) catch {};
+                                    };
+                                } else {
+                                    armSendEx(&ring, fd, send_data, use_direct_fds) catch {};
+                                }
                                 st.send_inflight = true;
                                 needs_submit = true;
                             }
@@ -452,8 +468,41 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                     if (uidx >= MAX_CONNS) continue;
                     const st = conns[uidx] orelse continue;
 
+                    // Handle send_zc notification CQE — buffer is now safe to reuse
+                    if (cqe.flags & IORING_CQE_F_NOTIF != 0) {
+                        st.zc_notif_pending = false;
+                        // Now safe to reuse write buffer
+                        if (!st.send_inflight) {
+                            st.write_buf.clearRetainingCapacity();
+                            st.write_off = 0;
+
+                            if (shutdown_flag.load(.acquire)) {
+                                st.deinit();
+                                alloc.destroy(st);
+                                conns[uidx] = null;
+                                if (use_direct_fds) {
+                                    _ = ring.close_direct(packUserData(.close, fd), @intCast(@as(u32, @bitCast(fd)))) catch {};
+                                    needs_submit = true;
+                                } else {
+                                    posix.close(@intCast(@as(u32, @bitCast(fd))));
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
                     if (res <= 0) {
-                        // Send error — close connection
+                        // Send error — check if it's send_zc not supported (-EINVAL/-ENOSYS)
+                        if (send_zc_state == 0 and (res == -22 or res == -38)) {
+                            // send_zc not supported by kernel — mark and retry with regular send
+                            send_zc_state = 2;
+                            armSendEx(&ring, fd, st.write_buf.items[st.write_off..], use_direct_fds) catch {
+                                st.send_inflight = false;
+                            };
+                            needs_submit = true;
+                            continue;
+                        }
+                        // Real send error — close connection
                         st.deinit();
                         alloc.destroy(st);
                         conns[uidx] = null;
@@ -466,10 +515,22 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                         continue;
                     }
 
+                    // Successful send — mark send_zc as supported if probing
+                    if (send_zc_state == 0 and (cqe.flags & IORING_CQE_F_MORE) != 0) {
+                        send_zc_state = 1; // send_zc confirmed working
+                    }
+
+                    // Check if send_zc notification will follow (IORING_CQE_F_MORE set)
+                    const zc_notif_coming = (cqe.flags & IORING_CQE_F_MORE) != 0;
+                    if (zc_notif_coming) {
+                        st.zc_notif_pending = true;
+                    }
+
                     st.write_off += @as(usize, @intCast(res));
 
                     if (st.write_off < st.write_buf.items.len) {
                         // Partial send — resubmit remainder
+                        // For partial sends, use regular send to avoid complex buffer lifetime tracking
                         armSendEx(&ring, fd, st.write_buf.items[st.write_off..], use_direct_fds) catch {
                             st.send_inflight = false;
                         };
@@ -477,20 +538,25 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                     } else {
                         // Send complete
                         st.send_inflight = false;
-                        st.write_buf.clearRetainingCapacity();
-                        st.write_off = 0;
 
-                        if (shutdown_flag.load(.acquire)) {
-                            st.deinit();
-                            alloc.destroy(st);
-                            conns[uidx] = null;
-                            if (use_direct_fds) {
-                                _ = ring.close_direct(packUserData(.close, fd), @intCast(@as(u32, @bitCast(fd)))) catch {};
-                                needs_submit = true;
-                            } else {
-                                posix.close(@intCast(@as(u32, @bitCast(fd))));
+                        if (!st.zc_notif_pending) {
+                            // No notification pending — safe to reuse buffer now
+                            st.write_buf.clearRetainingCapacity();
+                            st.write_off = 0;
+
+                            if (shutdown_flag.load(.acquire)) {
+                                st.deinit();
+                                alloc.destroy(st);
+                                conns[uidx] = null;
+                                if (use_direct_fds) {
+                                    _ = ring.close_direct(packUserData(.close, fd), @intCast(@as(u32, @bitCast(fd)))) catch {};
+                                    needs_submit = true;
+                                } else {
+                                    posix.close(@intCast(@as(u32, @bitCast(fd))));
+                                }
                             }
                         }
+                        // If zc_notif_pending, buffer cleanup deferred to notification handler above
                     }
                 },
 
@@ -566,6 +632,19 @@ fn armSendEx(ring: *IoUring, fd: i32, data: []const u8, fixed_file: bool) !void 
         fd,
         data,
         MSG_NOSIGNAL,
+    );
+    if (fixed_file) {
+        sqe.flags |= IOSQE_FIXED_FILE;
+    }
+}
+
+fn armSendZcEx(ring: *IoUring, fd: i32, data: []const u8, fixed_file: bool) !void {
+    const sqe = try ring.send_zc(
+        packUserData(.send, fd),
+        fd,
+        data,
+        MSG_NOSIGNAL,
+        0, // zc_flags — no IORING_SEND_ZC_REPORT_USAGE needed
     );
     if (fixed_file) {
         sqe.flags |= IOSQE_FIXED_FILE;
