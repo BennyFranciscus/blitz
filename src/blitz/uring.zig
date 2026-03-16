@@ -50,9 +50,10 @@ const IORING_CQE_F_NOTIF: u32 = linux.IORING_CQE_F_NOTIF;
 const IOSQE_FIXED_FILE: u8 = linux.IOSQE_FIXED_FILE;
 
 // ── User data encoding ─────────────────────────────────────────────
-// Layout: [op:8][gen:24][fd:32]
+// Layout: [op:4][gen:28][fd:32]
+// 4-bit op (5 opcodes), 28-bit generation (~268M before wraparound), 32-bit fd
 // Generation counters prevent stale CQEs from corrupting reused fd slots
-const Op = enum(u8) {
+const Op = enum(u4) {
     accept = 1,
     recv = 2,
     send = 3,
@@ -60,17 +61,17 @@ const Op = enum(u8) {
     close = 5,
 };
 
-fn packUserData(op: Op, gen: u24, fd: i32) u64 {
-    return (@as(u64, @intFromEnum(op)) << 56) |
+fn packUserData(op: Op, gen: u28, fd: i32) u64 {
+    return (@as(u64, @intFromEnum(op)) << 60) |
         (@as(u64, gen) << 32) |
         @as(u64, @intCast(@as(u32, @bitCast(fd))));
 }
 
 fn unpackOp(ud: u64) Op {
-    return @enumFromInt(@as(u8, @truncate(ud >> 56)));
+    return @enumFromInt(@as(u4, @truncate(ud >> 60)));
 }
 
-fn unpackGen(ud: u64) u24 {
+fn unpackGen(ud: u64) u28 {
     return @truncate(ud >> 32);
 }
 
@@ -92,7 +93,7 @@ const ConnState = struct {
     write_off: usize = 0,
     send_inflight: bool = false,
     zc_notif_pending: bool = false,
-    gen: u24 = 0, // generation counter — incremented on reuse, detects stale CQEs
+    gen: u28 = 0, // generation counter — incremented on reuse, detects stale CQEs
     dyn_buf: ?[]u8 = null,
 
     // Body discard mode — count body bytes without buffering
@@ -544,7 +545,7 @@ fn reactorThread(
     @memset(&conns, null);
 
     // Generation counters per fd slot — incremented on each close, used to detect stale CQEs
-    var conn_gens: [MAX_CONNS]u24 = undefined;
+    var conn_gens: [MAX_CONNS]u28 = undefined;
     @memset(&conn_gens, 0);
 
     // Connection pool
@@ -988,7 +989,7 @@ fn releaseConn(pool_opt: *?UringConnPool, st: *ConnState, alloc: std.mem.Allocat
 
 fn closeConn(
     conns: *[MAX_CONNS]?*ConnState,
-    conn_gens: *[MAX_CONNS]u24,
+    conn_gens: *[MAX_CONNS]u28,
     pool_opt: *?UringConnPool,
     ring: *IoUring,
     fd: i32,
@@ -1012,11 +1013,11 @@ fn closeConn(
     }
 }
 
-fn armSend(ring: *IoUring, gen: u24, fd: i32, data: []const u8) !void {
+fn armSend(ring: *IoUring, gen: u28, fd: i32, data: []const u8) !void {
     _ = try ring.send(packUserData(.send, gen, fd), fd, data, MSG_NOSIGNAL);
 }
 
-fn armSendZc(ring: *IoUring, gen: u24, fd: i32, data: []const u8) !void {
+fn armSendZc(ring: *IoUring, gen: u28, fd: i32, data: []const u8) !void {
     _ = try ring.send_zc(packUserData(.send, gen, fd), fd, data, MSG_NOSIGNAL, 0);
 }
 
