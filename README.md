@@ -23,6 +23,7 @@ A blazing-fast HTTP/1.1 micro web framework for Zig.
 - **Redirect helpers** — `redirect`, `redirectTemp`, `redirectPerm` for clean navigation
 - **Response compression** — automatic gzip/deflate compression for text responses (configurable)
 - **Request logging** — structured text or JSON logging with latency tracking, level filtering, and slow request detection
+- **SIMD HTTP parsing** — `@Vector(16, u8)` accelerated scanning for header boundaries, line terminators, and byte search
 - **WebSocket support** — RFC 6455 frame parsing/building, upgrade handshake, ping/pong, close codes
 - **Graceful shutdown** — handles SIGTERM/SIGINT, drains in-flight connections, configurable timeout
 - **Keep-alive timeout** — automatic idle connection cleanup via timerfd
