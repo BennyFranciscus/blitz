@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>blitz ⚡ Documentation</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<button class="menu-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')">☰</button>
+
+<div class="layout">
+
+<!-- ── Sidebar ── -->
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h1><span>⚡</span> blitz</h1>
+    <p>Blazing-fast HTTP framework for Zig</p>
+  </div>
+  <nav>
+    <div class="section-label">Getting Started</div>
+    <a href="#getting-started">Installation</a>
+    <a href="#quick-start">Quick Start</a>
+
+    <div class="section-label">Core</div>
+    <a href="#router">Router</a>
+    <a href="#request">Request API</a>
+    <a href="#response">Response API</a>
+    <a href="#middleware">Middleware</a>
+    <a href="#route-groups">Route Groups</a>
+
+    <div class="section-label">Features</div>
+    <a href="#json-builder">JSON Builder</a>
+    <a href="#query-parsing">Query Parsing</a>
+    <a href="#body-parsing">Body Parsing</a>
+    <a href="#cookies">Cookies</a>
+    <a href="#static-files">Static Files</a>
+    <a href="#websocket">WebSocket</a>
+    <a href="#compression">Compression</a>
+    <a href="#rate-limiting">Rate Limiting</a>
+    <a href="#cors">CORS</a>
+    <a href="#error-handling">Error Handling</a>
+    <a href="#logging">Logging</a>
+    <a href="#graceful-shutdown">Graceful Shutdown</a>
+
+    <div class="section-label">Advanced</div>
+    <a href="#io-uring">io_uring Backend</a>
+    <a href="#architecture">Architecture</a>
+    <a href="#benchmarks">Benchmarks</a>
+
+    <div class="section-label">Links</div>
+    <a href="https://github.com/BennyFranciscus/blitz">GitHub</a>
+    <a href="https://github.com/MDA2AV/HttpArena">HttpArena</a>
+  </nav>
+</aside>
+
+<!-- ── Content ── -->
+<main class="content">
+
+<!-- ─── Getting Started ─── -->
+<section id="getting-started">
+  <h2>Getting Started</h2>
+  <p>blitz is a micro web framework for Zig focused on raw performance and a clean API. Add it to your project in two steps.</p>
+
+  <h3>Installation</h3>
+  <p>Add blitz to your <code>build.zig.zon</code>:</p>
+  <pre><code>zig fetch --save "https://github.com/BennyFranciscus/blitz/archive/main.tar.gz"</code></pre>
+
+  <p>Then in your <code>build.zig</code>:</p>
+  <pre><code>const blitz_dep = b.dependency("blitz", .{
+    .target = target,
+    .optimize = optimize,
+});
+exe.root_module.addImport("blitz", blitz_dep.module("blitz"));
+exe.linkLibC(); // required for signal handling and io_uring</code></pre>
+</section>
+
+<section id="quick-start">
+  <h2>Quick Start</h2>
+  <pre><code>const std = @import("std");
+const blitz = @import("blitz");
+
+fn hello(_: *blitz.Request, res: *blitz.Response) void {
+    _ = res.text("Hello, World!");
+}
+
+fn greet(req: *blitz.Request, res: *blitz.Response) void {
+    const name = req.params.get("name") orelse "stranger";
+    _ = res.text(name);
+}
+
+pub fn main() !void {
+    var router = blitz.Router.init(std.heap.c_allocator);
+    router.get("/", hello);
+    router.get("/hello/:name", greet);
+
+    var server = blitz.Server.init(&amp;router, .{ .port = 8080 });
+    try server.listen();
+}</code></pre>
+  <p>Build and run:</p>
+  <pre><code>zig build -Doptimize=ReleaseFast
+./zig-out/bin/your-app</code></pre>
+</section>
+
+<!-- ─── Router ─── -->
+<section id="router">
+  <h2>Router</h2>
+  <p>blitz uses a radix-trie router for fast path matching with support for path parameters, wildcards, and custom 404 handlers.</p>
+  <pre><code>var router = blitz.Router.init(allocator);
+
+// HTTP methods
+router.get("/path", handler);
+router.post("/path", handler);
+router.put("/path", handler);
+router.delete("/path", handler);
+router.patch("/path", handler);
+router.head("/path", handler);
+router.options("/path", handler);
+router.route(.PATCH, "/path", handler);
+
+// Path parameters
+router.get("/users/:id", getUserHandler);
+
+// Wildcards
+router.get("/static/*filepath", staticHandler);
+
+// Custom 404 (or use the built-in JSON one)
+router.notFound(blitz.jsonNotFoundHandler);</code></pre>
+</section>
+
+<!-- ─── Request ─── -->
+<section id="request">
+  <h2>Request API</h2>
+  <pre><code>fn handler(req: *blitz.Request, res: *blitz.Response) void {
+    // Method
+    if (req.method == .GET) { ... }
+
+    // Path parameters
+    const id = req.params.get("id") orelse "unknown";
+
+    // Simple query parameter lookup (zero-copy)
+    const page = req.queryParam("page") orelse "1";
+
+    // Structured query parsing with typed access
+    const q = req.queryParsed();
+    const limit = q.getInt("limit", i64) orelse 20;
+    const asc = q.getBool("asc") orelse true;
+    _ = limit;
+    _ = asc;
+
+    // URL-decoded query param
+    var decode_buf: [256]u8 = undefined;
+    const search = q.getDecode("q", &amp;decode_buf);
+    _ = search;
+
+    // Headers
+    const ct = req.headers.get("Content-Type");
+
+    // Body
+    if (req.body) |body| { ... }
+}</code></pre>
+</section>
+
+<!-- ─── Response ─── -->
+<section id="response">
+  <h2>Response API</h2>
+  <pre><code>fn handler(_: *blitz.Request, res: *blitz.Response) void {
+    // Plain text
+    _ = res.text("hello");
+
+    // JSON (raw string)
+    _ = res.json("{\"ok\":true}");
+
+    // HTML
+    _ = res.html("&lt;h1&gt;Hello&lt;/h1&gt;");
+
+    // Custom status
+    _ = res.setStatus(.not_found).text("Not Found");
+
+    // Custom headers
+    res.headers.set("X-Custom", "value");
+
+    // Pre-computed raw response (maximum performance)
+    _ = res.rawResponse("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+}</code></pre>
+
+  <h3>Redirects</h3>
+  <pre><code>fn handler(_: *blitz.Request, res: *blitz.Response) void {
+    // Temporary redirect (302)
+    _ = res.redirectTemp("/login");
+
+    // Permanent redirect (301)
+    _ = res.redirectPerm("/new-url");
+
+    // Custom status redirect
+    _ = res.redirect("/other", .found);
+}</code></pre>
+</section>
+
+<!-- ─── Middleware ─── -->
+<section id="middleware">
+  <h2>Middleware</h2>
+  <p>Middleware functions return <code>true</code> to continue or <code>false</code> to short-circuit (e.g., deny access).</p>
+
+  <h3>Global Middleware</h3>
+  <p>Runs on every request:</p>
+  <pre><code>// Use the built-in CORS middleware
+router.use(blitz.Cors.permissive());
+
+// Or write your own
+fn timing(_: *blitz.Request, res: *blitz.Response) bool {
+    res.headers.set("Server-Timing", "middleware");
+    return true;
+}
+router.use(timing);</code></pre>
+
+  <h3>Per-Route Middleware</h3>
+  <p>Runs only on matching routes:</p>
+  <pre><code>fn auth(req: *blitz.Request, res: *blitz.Response) bool {
+    if (req.headers.get("Authorization") == null) {
+        blitz.unauthorized(res, "Token required");
+        return false; // stop here
+    }
+    return true;
+}
+
+// Attach middleware to a path prefix — applies to all routes under it
+router.useAt("/api", auth);
+
+// Or attach middleware to a route group (same effect, cleaner API)
+const api = router.group("/api/v1");
+api.use(auth);           // Only /api/v1/* routes run this
+api.get("/users", listUsers);
+api.get("/users/:id", getUser);
+
+// Nested groups stack middleware
+const admin = api.group("/admin");
+admin.use(adminOnly);    // Runs auth + adminOnly for /api/v1/admin/*
+admin.get("/stats", adminStats);</code></pre>
+
+  <p><strong>Execution order:</strong> global middleware → per-route middleware (collected along the matched path) → handler.</p>
+  <p>Middleware on parent paths runs before middleware on child paths, so you can layer auth, logging, rate limiting at different levels of your route tree.</p>
+</section>
+
+<!-- ─── Route Groups ─── -->
+<section id="route-groups">
+  <h2>Route Groups</h2>
+  <p>Groups share a URL prefix — great for versioned APIs. Prefix concatenation happens at init time with zero runtime overhead.</p>
+  <pre><code>const api = router.group("/api/v1");
+api.get("/users", listUsers);       // matches /api/v1/users
+api.get("/users/:id", getUser);     // matches /api/v1/users/:id
+api.post("/users", createUser);     // matches /api/v1/users
+
+// Nested groups
+const admin = api.group("/admin");
+admin.get("/stats", adminStats);    // matches /api/v1/admin/stats</code></pre>
+</section>
+
+<!-- ─── JSON Builder ─── -->
+<section id="json-builder">
+  <h2>JSON Builder</h2>
+  <p>Zero-allocation JSON serialization powered by comptime. Writes directly into caller-provided buffers.</p>
+
+  <h3>Struct Serialization</h3>
+  <pre><code>var buf: [512]u8 = undefined;
+const json_str = blitz.Json.stringify(&amp;buf, .{
+    .name = "Alice",
+    .age = @as(i64, 30),
+    .active = true,
+}) orelse return error.BufferOverflow;
+_ = res.json(json_str);</code></pre>
+
+  <h3>Manual Object Building</h3>
+  <pre><code>var obj_buf: [256]u8 = undefined;
+var obj = blitz.JsonObject.init(&amp;obj_buf);
+obj.field("id", @as(i64, 1));
+obj.field("name", "Alice");
+obj.field("tags", @as([]const []const u8, &amp;.{ "admin", "user" }));
+const body = obj.finish() orelse "{}";
+_ = res.json(body);</code></pre>
+
+  <h3>Array Building</h3>
+  <pre><code>var arr_buf: [256]u8 = undefined;
+var arr = blitz.JsonArray.init(&amp;arr_buf);
+arr.push(@as(i64, 1));
+arr.push(@as(i64, 2));
+arr.push(@as(i64, 3));
+const list = arr.finish() orelse "[]";</code></pre>
+
+  <p>Supports: structs, slices, ints, floats, bools, strings, optionals (null fields skipped), enums (as strings).</p>
+</section>
+
+<!-- ─── Query Parsing ─── -->
+<section id="query-parsing">
+  <h2>Query Parsing</h2>
+  <p>Structured query string parsing with typed access, URL decoding, multi-value support, and iteration.</p>
+  <pre><code>fn search(req: *blitz.Request, res: *blitz.Response) void {
+    const q = req.queryParsed(); // GET /search?q=hello+world&amp;page=2&amp;debug
+
+    // Simple string lookup (raw, no decoding)
+    const term = q.get("q");                          // "hello+world"
+
+    // URL-decoded value
+    var buf: [256]u8 = undefined;
+    const decoded = q.getDecode("q", &amp;buf);           // "hello world"
+    _ = decoded;
+
+    // Typed access
+    const page = q.getInt("page", i64) orelse 1;      // 2
+    const debug = q.getBool("debug") orelse false;     // false
+    _ = page;
+    _ = debug;
+
+    // Check key existence (even without value)
+    if (q.has("debug")) { ... }
+
+    // Multi-value params: /search?tag=zig&amp;tag=http&amp;tag=fast
+    var tags: [8][]const u8 = undefined;
+    const n = q.getAll("tag", &amp;tags);                  // n=3
+    _ = n;
+
+    // Iterate all params
+    var it = q.iterator();
+    while (it.next()) |param| {
+        // param.key, param.value
+        _ = param;
+    }
+
+    _ = res.json("{\"ok\":true}");
+}</code></pre>
+
+  <h3>Standalone URL Decoding</h3>
+  <pre><code>var buf: [256]u8 = undefined;
+const decoded = blitz.urlDecode(&amp;buf, "hello%20world+foo"); // "hello world foo"</code></pre>
+</section>
+
+<!-- ─── Body Parsing ─── -->
+<section id="body-parsing">
+  <h2>Body Parsing</h2>
+  <p>Parse form bodies and multipart uploads with zero-copy efficiency.</p>
+
+  <h3>URL-Encoded Forms</h3>
+  <pre><code>fn handleForm(req: *blitz.Request, res: *blitz.Response) void {
+    const form = req.formData(); // parses application/x-www-form-urlencoded
+
+    const name = form.get("name") orelse "anonymous";
+    const age = form.getInt("age", i64) orelse 0;
+    _ = age;
+
+    // URL-decoded values
+    var buf: [256]u8 = undefined;
+    const msg = form.getDecode("message", &amp;buf);
+    _ = msg;
+
+    _ = res.text(name);
+}</code></pre>
+
+  <h3>Multipart/Form-Data (File Uploads)</h3>
+  <pre><code>fn handleUpload(req: *blitz.Request, res: *blitz.Response) void {
+    const mp = req.multipart() orelse {
+        blitz.badRequest(res, "Expected multipart body");
+        return;
+    };
+
+    // Get a text field
+    if (mp.get("title")) |part| {
+        // part.data is the field value
+        _ = part;
+    }
+
+    // Get a file upload
+    if (mp.getFile("avatar")) |file| {
+        // file.filename  — original filename
+        // file.content_type — MIME type
+        // file.data — file contents (slice into request body)
+        _ = file;
+    }
+
+    _ = res.text("uploaded");
+}</code></pre>
+
+  <h3>Content Type Detection</h3>
+  <pre><code>fn handler(req: *blitz.Request, res: *blitz.Response) void {
+    switch (req.contentType()) {
+        .json =&gt; { /* parse JSON body */ },
+        .form_urlencoded =&gt; { const form = req.formData(); _ = form; },
+        .multipart =&gt; { const mp = req.multipart(); _ = mp; },
+        else =&gt; { blitz.badRequest(res, "Unsupported content type"); return; },
+    }
+    _ = res.text("ok");
+}</code></pre>
+</section>
+
+<!-- ─── Cookies ─── -->
+<section id="cookies">
+  <h2>Cookies</h2>
+  <p>Zero-copy request cookie parsing and full RFC 6265 response cookie support.</p>
+
+  <h3>Reading Cookies</h3>
+  <pre><code>fn handler(req: *blitz.Request, res: *blitz.Response) void {
+    // Get a single cookie value
+    const session = req.cookie("session") orelse "none";
+    _ = session;
+
+    // Parse all cookies into a CookieJar
+    const jar = req.cookies();
+    if (jar.has("theme")) {
+        const theme = jar.get("theme").?;
+        _ = theme;
+    }
+
+    // Iterate all cookies
+    var it = jar.iterator();
+    while (it.next()) |c| {
+        // c.name, c.value
+        _ = c;
+    }
+
+    _ = res.text("ok");
+}</code></pre>
+
+  <h3>Setting Cookies</h3>
+  <pre><code>fn login(_: *blitz.Request, res: *blitz.Response) void {
+    var buf: [256]u8 = undefined;
+    _ = res.setCookie(&amp;buf, "session", "tok_abc123", .{
+        .max_age = 86400,       // 24 hours
+        .path = "/",
+        .domain = "example.com",
+        .secure = true,
+        .http_only = true,
+        .same_site = .lax,      // .strict, .lax, or .none
+    });
+    _ = res.json("{\"ok\":true}");
+}
+
+fn logout(_: *blitz.Request, res: *blitz.Response) void {
+    var buf: [256]u8 = undefined;
+    _ = res.deleteCookie(&amp;buf, "session", .{ .path = "/" });
+    _ = res.json("{\"logged_out\":true}");
+}</code></pre>
+</section>
+
+<!-- ─── Static Files ─── -->
+<section id="static-files">
+  <h2>Static Files</h2>
+  <p>Serve files from disk with automatic MIME type detection, directory traversal protection, and optional cache control.</p>
+  <pre><code>// Serve files from ./public at /static/*
+router.staticDir("/static", "./public", .{});
+
+// With options
+router.staticDir("/assets", "./dist", .{
+    .cache_control = "public, max-age=31536000",  // immutable assets
+    .index = true,                                  // serve index.html for directories
+    .max_file_size = 10 * 1024 * 1024,             // 10MB max
+});</code></pre>
+
+  <p><strong>Features:</strong></p>
+  <ul>
+    <li><strong>40+ MIME types</strong> — HTML, CSS, JS, images, fonts, media, archives, WASM</li>
+    <li><strong>Path traversal protection</strong> — rejects <code>../</code>, absolute paths, null bytes</li>
+    <li><strong>Directory index</strong> — automatically serves <code>index.html</code> for directory paths</li>
+    <li><strong>Cache-Control</strong> — optional header for browser caching</li>
+    <li><strong>GET/HEAD only</strong> — other methods fall through to route matching</li>
+  </ul>
+</section>
+
+<!-- ─── WebSocket ─── -->
+<section id="websocket">
+  <h2>WebSocket</h2>
+  <p>Full RFC 6455 WebSocket support for building real-time applications.</p>
+  <pre><code>const blitz = @import("blitz");
+const ws = blitz.WebSocket;
+
+fn handleWsUpgrade(req: *blitz.Request, res: *blitz.Response) void {
+    // Check if this is a WebSocket upgrade request
+    if (!ws.isUpgradeRequest(req)) {
+        _ = res.setStatus(.bad_request).text("Expected WebSocket upgrade");
+        return;
+    }
+
+    // Get the client's key
+    const key = req.header("Sec-WebSocket-Key") orelse return;
+
+    // Build and send the 101 Switching Protocols response
+    var buf: [512]u8 = undefined;
+    const upgrade_resp = ws.buildUpgradeResponse(&amp;buf, key, null) orelse return;
+    _ = res.rawResponse(upgrade_resp);
+
+    // After upgrade, use ws.parseFrame() and ws.buildFrame() for communication
+}</code></pre>
+
+  <p><strong>Frame operations:</strong></p>
+  <ul>
+    <li><code>ws.parseFrame(data)</code> — parse incoming frames (auto-unmasks client data)</li>
+    <li><code>ws.buildFrame(buf, opcode, payload, fin)</code> — build outgoing frames (text, binary, ping, pong)</li>
+    <li><code>ws.buildCloseFrame(buf, code, reason)</code> — build close frame with status code</li>
+  </ul>
+  <p><strong>Opcodes:</strong> <code>.text</code>, <code>.binary</code>, <code>.close</code>, <code>.ping</code>, <code>.pong</code>, <code>.continuation</code></p>
+  <p><strong>Close codes:</strong> <code>.normal</code>, <code>.going_away</code>, <code>.protocol_error</code>, <code>.too_large</code>, etc.</p>
+</section>
+
+<!-- ─── Compression ─── -->
+<section id="compression">
+  <h2>Compression</h2>
+  <p>blitz automatically compresses responses with gzip or deflate when the client supports it. Compression is <strong>enabled by default</strong>.</p>
+
+  <pre><code>var server = blitz.Server.init(&amp;router, .{
+    .port = 8080,
+    .compression = true,  // default — automatic gzip/deflate
+});
+
+// Disable compression (e.g., for benchmarks)
+var server2 = blitz.Server.init(&amp;router, .{
+    .compression = false,
+});</code></pre>
+
+  <p><strong>How it works:</strong></p>
+  <ul>
+    <li>After each handler runs, blitz checks <code>Accept-Encoding</code> and compresses the body if beneficial</li>
+    <li>Uses Zig's <code>std.compress.gzip</code> (fast level) for minimal latency overhead</li>
+    <li>Adds <code>Content-Encoding: gzip</code> and <code>Vary: Accept-Encoding</code> headers automatically</li>
+    <li>If compressed output is larger than the original, compression is skipped</li>
+    <li>Pre-computed <code>rawResponse()</code> calls bypass compression (benchmark fast path)</li>
+    <li>Minimum body size: 256 bytes</li>
+  </ul>
+
+  <h3>Manual Compression</h3>
+  <pre><code>const blitz = @import("blitz");
+
+fn handler(req: *blitz.Request, res: *blitz.Response) void {
+    _ = res.json(large_json_string);
+
+    // Check if compression is worthwhile
+    if (blitz.shouldCompress(req, res)) {
+        var buf: [65536]u8 = undefined;
+        _ = blitz.compressResponse(&amp;buf, req, res);
+    }
+}</code></pre>
+</section>
+
+<!-- ─── Rate Limiting ─── -->
+<section id="rate-limiting">
+  <h2>Rate Limiting</h2>
+  <p>Token-bucket rate limiter with per-IP tracking and standard HTTP headers.</p>
+  <pre><code>// Initialize the rate limiter
+var limiter = try blitz.RateLimiter.init(allocator, .{
+    .max_requests = 100,  // requests per window
+    .window_secs = 60,    // window duration
+    .max_clients = 4096,  // max tracked IPs
+});
+
+// Use in handlers
+fn myHandler(req: *blitz.Request, res: *blitz.Response) void {
+    if (!blitz.RateLimit.allow(&amp;limiter, req, res)) return;
+    // ... handle request normally
+}</code></pre>
+
+  <p>The rate limiter extracts client IPs from <code>X-Forwarded-For</code> or <code>X-Real-IP</code> headers (for reverse proxy setups), and sets <code>X-RateLimit-Remaining</code> and <code>Retry-After</code> headers automatically.</p>
+</section>
+
+<!-- ─── CORS ─── -->
+<section id="cors">
+  <h2>CORS</h2>
+  <p>Built-in CORS middleware with configurable origins, methods, and preflight handling.</p>
+  <pre><code>// Permissive CORS — allow all origins
+router.use(blitz.Cors.permissive());
+
+// Configured CORS — specific origins with credentials
+router.use(blitz.Cors.middleware(.{
+    .origins = &amp;.{ "https://myapp.com", "http://localhost:3000" },
+    .allow_credentials = true,
+    .headers = "Content-Type, Authorization, X-Request-ID",
+    .max_age = 3600,
+    .max_age_str = "3600",
+}));</code></pre>
+
+  <p>The CORS middleware automatically handles OPTIONS preflight requests (returns 204 with appropriate headers) and sets <code>Access-Control-Allow-Origin</code>, <code>Vary</code>, and <code>Access-Control-Allow-Credentials</code> headers on all responses.</p>
+  <p>When <code>allow_credentials</code> is true, the middleware echoes the request's <code>Origin</code> header instead of using <code>*</code> (as required by the spec).</p>
+</section>
+
+<!-- ─── Error Handling ─── -->
+<section id="error-handling">
+  <h2>Error Handling</h2>
+  <p>Structured JSON error responses with convenience helpers.</p>
+  <pre><code>fn getUser(req: *blitz.Request, res: *blitz.Response) void {
+    const id = req.params.get("id") orelse {
+        blitz.badRequest(res, "Missing user ID");
+        return;
+    };
+    // ... look up user ...
+    blitz.notFound(res, "User not found");
+}
+
+// Available error helpers:
+blitz.badRequest(res, "message");      // 400
+blitz.unauthorized(res, "message");    // 401
+blitz.forbidden(res, "message");       // 403
+blitz.notFound(res, "message");        // 404
+blitz.methodNotAllowed(res, "msg");    // 405
+blitz.internalError(res, "message");   // 500
+
+// Generic:
+blitz.sendError(res, .bad_request, "Custom message");
+
+// Response format: {"error":{"status":400,"message":"Missing user ID"}}
+
+// Built-in JSON 404 handler for the router:
+router.notFound(blitz.jsonNotFoundHandler);</code></pre>
+</section>
+
+<!-- ─── Logging ─── -->
+<section id="logging">
+  <h2>Logging</h2>
+  <p>Built-in structured request logging with zero allocations — writes directly to stderr.</p>
+
+  <pre><code>var server = blitz.Server.init(&amp;router, .{
+    .port = 8080,
+    .logging = .{
+        .enabled = true,
+        .format = .text,          // .text or .json
+        .min_level = .info,       // .debug, .info, .warn, .err, .off
+        .slow_threshold_ms = 500, // warn on slow requests (0 = disabled)
+    },
+});</code></pre>
+
+  <h3>Text Format</h3>
+  <pre><code>INFO  GET /api/users?page=1 200 1.2ms 256B
+WARN  POST /api/login 401 0.3ms 45B
+ERROR GET /crash 500 15.7ms 128B</code></pre>
+
+  <h3>JSON Format</h3>
+  <pre><code>{"level":"INFO","method":"GET","path":"/api/users","query":"page=1","status":200,"latency_us":1200,"size":256}</code></pre>
+
+  <p><strong>Log levels</strong> are auto-determined from response status: <code>5xx</code> → ERROR, <code>4xx</code> → WARN, <code>2xx</code>/<code>3xx</code> → INFO.</p>
+
+  <p><strong>Slow request detection:</strong> Set <code>slow_threshold_ms</code> to log requests exceeding the threshold even if their status-based level is below <code>min_level</code>.</p>
+
+  <h3>General-Purpose Logging</h3>
+  <pre><code>blitz.logMsg(config, .info, "server started on port 8080");
+blitz.logMsg(config, .warn, "connection pool exhausted");</code></pre>
+
+  <p>Logging is <strong>disabled by default</strong> — zero overhead when not configured. All formatting uses stack buffers (no heap allocations).</p>
+</section>
+
+<!-- ─── Graceful Shutdown ─── -->
+<section id="graceful-shutdown">
+  <h2>Graceful Shutdown</h2>
+  <p>blitz handles <code>SIGTERM</code> and <code>SIGINT</code> automatically:</p>
+  <ol>
+    <li><strong>Stops accepting</strong> new connections immediately</li>
+    <li><strong>Finishes in-flight</strong> requests and flushes responses</li>
+    <li><strong>Sends <code>Connection: close</code></strong> to signal clients</li>
+    <li><strong>Drains</strong> for up to <code>shutdown_timeout</code> seconds</li>
+    <li><strong>Force-closes</strong> remaining connections if timeout expires</li>
+  </ol>
+  <p>Works correctly as PID 1 in Docker containers. Check <code>blitz.isShuttingDown()</code> in middleware or handlers to detect shutdown in progress.</p>
+
+  <pre><code>// Middleware that rejects new work during shutdown
+fn shutdownAware(req: *blitz.Request, res: *blitz.Response) bool {
+    if (blitz.isShuttingDown()) {
+        _ = res.setStatus(.service_unavailable).text("Shutting down");
+        return false;
+    }
+    return true;
+}</code></pre>
+
+  <h3>Server Configuration</h3>
+  <pre><code>var server = blitz.Server.init(&amp;router, .{
+    .port = 8080,
+    .threads = null,          // auto-detect CPU count
+    .keep_alive_timeout = 60, // seconds (0 = disable)
+    .shutdown_timeout = 30,   // seconds to drain before force-close
+});
+try server.listen(); // Blocks until SIGTERM/SIGINT</code></pre>
+</section>
+
+<!-- ─── io_uring ─── -->
+<section id="io-uring">
+  <h2>io_uring Backend</h2>
+  <div class="badges">
+    <span class="badge badge-yellow">Experimental</span>
+    <span class="badge badge-blue">Linux 5.19+</span>
+  </div>
+
+  <p>For maximum throughput, blitz includes an io_uring backend:</p>
+  <pre><code>// In your main.zig:
+var uring_server = blitz.UringServer.init(&amp;router, .{
+    .port = 8080,
+    .threads = null,       // auto-detect
+    .compression = false,  // for benchmarks
+});
+try uring_server.listen();</code></pre>
+
+  <p>Or use the environment variable:</p>
+  <pre><code>BLITZ_URING=1 ./blitz</code></pre>
+
+  <h3>Architecture</h3>
+  <ul>
+    <li><strong>Dedicated acceptor thread</strong> — single io_uring ring with multishot accept, distributes connections round-robin</li>
+    <li><strong>SPSC queue fd handoff</strong> — lock-free single-producer/single-consumer queue (cache-line aligned) per reactor thread for zero-contention fd distribution</li>
+    <li><strong>Reactor threads</strong> — each has its own io_uring ring dedicated to recv/send (no accept overhead)</li>
+    <li><strong>Kernel-managed buffer ring</strong> (<code>io_uring_buf_ring</code>) — 4096 pre-allocated recv buffers, zero-SQE buffer recycling via shared memory</li>
+    <li><strong>Zero-copy send</strong> (<code>send_zc</code>) — eliminates kernel buffer copy for response writes (kernel 6.0+, auto-fallback)</li>
+    <li><strong>Async send</strong> — non-blocking response writes with partial-send resubmission</li>
+    <li><strong>SINGLE_ISSUER + DEFER_TASKRUN</strong> — reduced kernel overhead on reactor rings (auto-fallback for older kernels)</li>
+    <li><strong>Connection pooling</strong> — per-reactor pre-allocated ConnState pool (4096 slots) with O(1) acquire/release</li>
+  </ul>
+
+  <p><strong>Requirements:</strong> Linux 5.19+ (6.0+ for zero-copy send, 6.1+ for DEFER_TASKRUN). Docker containers need <code>--privileged</code> or appropriate seccomp profile.</p>
+</section>
+
+<!-- ─── Architecture ─── -->
+<section id="architecture">
+  <h2>Architecture</h2>
+  <div class="file-tree">
+src/<br>
+├── blitz.zig &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# Module root — re-exports everything<br>
+├── blitz/<br>
+│ &nbsp;&nbsp;├── types.zig &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# Request, Response, Method, StatusCode, Headers<br>
+│ &nbsp;&nbsp;├── router.zig &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# Radix-trie router with middleware, groups, params &amp; wildcards<br>
+│ &nbsp;&nbsp;├── parser.zig &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# Zero-copy HTTP/1.1 request parser<br>
+│ &nbsp;&nbsp;├── server.zig &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# Epoll event loop, connection management, graceful shutdown<br>
+│ &nbsp;&nbsp;├── uring.zig &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# io_uring backend — acceptor + reactor threads<br>
+│ &nbsp;&nbsp;├── spsc.zig &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# Lock-free SPSC queue for cross-thread fd handoff<br>
+│ &nbsp;&nbsp;├── pool.zig &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# Connection pool — pre-allocated ConnState objects<br>
+│ &nbsp;&nbsp;├── query.zig &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# Query string parser with URL decoding and typed access<br>
+│ &nbsp;&nbsp;├── json.zig &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# Comptime JSON serializer (Json, JsonObject, JsonArray)<br>
+│ &nbsp;&nbsp;├── body.zig &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# Request body parsing (URL-encoded, multipart)<br>
+│ &nbsp;&nbsp;├── cookie.zig &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# Cookie parsing and Set-Cookie builder (RFC 6265)<br>
+│ &nbsp;&nbsp;├── compress.zig &nbsp;&nbsp;&nbsp;# Response compression (gzip/deflate)<br>
+│ &nbsp;&nbsp;├── errors.zig &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# Structured error responses<br>
+│ &nbsp;&nbsp;├── static.zig &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# Static file serving (MIME detection, path security)<br>
+│ &nbsp;&nbsp;├── websocket.zig &nbsp;&nbsp;# WebSocket frames, handshake, close codes (RFC 6455)<br>
+│ &nbsp;&nbsp;└── tests.zig &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# Unit tests for all modules<br>
+├── main.zig &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# HttpArena benchmark entry point<br>
+examples/<br>
+└── hello.zig &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# Example app with all features
+  </div>
+
+  <h3>Design Decisions</h3>
+  <ul>
+    <li><strong>No allocations in hot path</strong> — responses written to pre-allocated buffers</li>
+    <li><strong>Edge-triggered epoll</strong> — fewer syscalls than level-triggered</li>
+    <li><strong>SO_REUSEPORT</strong> — kernel distributes connections across worker threads</li>
+    <li><strong>Pre-computed responses</strong> — full HTTP response built at startup for static data</li>
+    <li><strong>Radix trie over hash map</strong> — better cache locality for path matching</li>
+    <li><strong>Layered middleware</strong> — global + per-route; <code>fn(*Req, *Res) bool</code> is simpler and faster than callback chains</li>
+    <li><strong>Route groups</strong> — prefix concatenation at init time, zero runtime overhead</li>
+    <li><strong>Comptime JSON</strong> — Zig's comptime introspects struct fields at compile time, no reflection cost at runtime</li>
+    <li><strong>Connection pool</strong> — pre-allocated ConnState per worker thread, O(1) acquire/release</li>
+    <li><strong>Keep-alive timeout</strong> — timerfd-based idle connection sweep</li>
+    <li><strong>Body discard mode</strong> — large uploads (>64KB) are counted but not buffered, reducing memory from O(body_size × connections) to near-zero</li>
+    <li><strong>SIMD HTTP parsing</strong> — <code>@Vector(16, u8)</code> accelerated scanning for header boundaries and byte search</li>
+  </ul>
+</section>
+
+<!-- ─── Benchmarks ─── -->
+<section id="benchmarks">
+  <h2>Benchmarks</h2>
+  <p>Benchmarked on <a href="https://github.com/MDA2AV/HttpArena">HttpArena</a> — 64-core AMD Threadripper, dedicated hardware, io_uring backend.</p>
+
+  <table>
+    <thead>
+      <tr><th>Profile</th><th>Connections</th><th>Throughput</th><th>Memory</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Baseline</td><td>4096</td><td><strong>3.06M</strong> req/s</td><td>4.1 GiB</td></tr>
+      <tr><td>Baseline</td><td>16384</td><td><strong>2.77M</strong> req/s</td><td>4.2 GiB</td></tr>
+      <tr><td>Pipelined (p=16)</td><td>4096</td><td><strong>38.9M</strong> req/s</td><td>4.1 GiB</td></tr>
+      <tr><td>JSON (8.4KB body)</td><td>16384</td><td><strong>1.66M</strong> req/s</td><td>3.8 GiB</td></tr>
+      <tr><td>Upload (20MB body)</td><td>64</td><td><strong>1,117</strong> req/s</td><td>4.1 GiB</td></tr>
+      <tr><td>Compression (gzip)</td><td>4096</td><td><strong>95K</strong> req/s</td><td>4.5 GiB</td></tr>
+      <tr><td>Noisy (mixed traffic)</td><td>4096</td><td><strong>1.99M</strong> req/s</td><td>4.1 GiB</td></tr>
+      <tr><td>Limited-conn (r=10)</td><td>4096</td><td><strong>1.38M</strong> req/s</td><td>4.1 GiB</td></tr>
+      <tr><td>WebSocket echo (p=16)</td><td>4096</td><td><strong>50.2M</strong> msg/s</td><td>4.1 GiB</td></tr>
+    </tbody>
+  </table>
+
+  <p><strong>#3 on HttpArena baseline</strong>, behind ringzero (C, io_uring) at 3.43M and h2o (C) at 3.16M. Ahead of nginx (3.03M), hyper/Rust (2.94M), actix/Rust (2.71M), and drogon/C++ (2.25M).</p>
+</section>
+
+</main>
+</div>
+
+<!-- ── Sidebar active link highlighting ── -->
+<script>
+const links = document.querySelectorAll('.sidebar nav a[href^="#"]');
+const sections = [...links].map(a => document.querySelector(a.getAttribute('href'))).filter(Boolean);
+
+function updateActive() {
+  let current = '';
+  for (const section of sections) {
+    if (section.getBoundingClientRect().top <= 80) current = section.id;
+  }
+  links.forEach(a => {
+    a.classList.toggle('active', a.getAttribute('href') === '#' + current);
+  });
+}
+
+window.addEventListener('scroll', updateActive);
+window.addEventListener('load', updateActive);
+
+// Close mobile sidebar on link click
+links.forEach(a => a.addEventListener('click', () => {
+  document.querySelector('.sidebar').classList.remove('open');
+}));
+</script>
+
+</body>
+</html>
