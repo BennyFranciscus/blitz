@@ -42,6 +42,9 @@ const IORING_SETUP_DEFER_TASKRUN: u32 = 1 << 13; // 6.1+
 // CQE flags
 const IORING_CQE_F_MORE: u32 = 1 << 1;
 
+// Registered file descriptor flag
+const IOSQE_FIXED_FILE: u8 = linux.IOSQE_FIXED_FILE;
+
 // ── User data encoding ─────────────────────────────────────────────
 // Pack operation type (upper 8 bits) + fd (lower 24 bits) into u64
 const Op = enum(u8) {
@@ -49,6 +52,7 @@ const Op = enum(u8) {
     recv = 2,
     send = 3,
     cancel = 4,
+    close = 5,
 };
 
 fn packUserData(op: Op, fd: i32) u64 {
@@ -202,6 +206,14 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
     };
     defer ring.deinit();
 
+    // Try to register sparse file descriptor table for direct I/O
+    // This avoids per-IO fd table lookup overhead (atomic refcount on struct file)
+    // Falls back to regular fds on older kernels (< 5.19)
+    const use_direct_fds = blk: {
+        ring.register_files_sparse(@intCast(MAX_CONNS)) catch break :blk false;
+        break :blk true;
+    };
+
     // Allocate recv buffer slab for BufferGroup
     const slab_size: usize = @as(usize, RECV_BUF_COUNT) * @as(usize, RECV_BUF_SIZE);
     const slab = alloc.alloc(u8, slab_size) catch return;
@@ -218,17 +230,21 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
     ) catch return;
     defer buf_group.deinit();
 
-    // Connection state array (sparse, indexed by fd)
+    // Connection state array (sparse, indexed by fd or file index)
     var conns: [MAX_CONNS]?*ConnState = undefined;
     @memset(&conns, null);
 
-    // Arm multishot accept
-    armMultishotAccept(&ring, sock) catch return;
+    // Arm multishot accept (direct or regular depending on kernel support)
+    if (use_direct_fds) {
+        armMultishotAcceptDirect(&ring, sock) catch return;
+    } else {
+        armMultishotAccept(&ring, sock) catch return;
+    }
     _ = ring.submit() catch return;
 
     // Monitor signal pipe on primary thread
     if (is_primary and signal_pipe[0] >= 0) {
-        // Use poll_add for signal pipe
+        // Use poll_add for signal pipe (regular fd, not registered)
         _ = ring.poll_add(
             packUserData(.cancel, signal_pipe[0]),
             signal_pipe[0],
@@ -260,39 +276,68 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
             switch (op) {
                 .accept => {
                     if (res >= 0) {
-                        const client_fd: i32 = res;
-                        setSockOptInt(client_fd, IPPROTO_TCP, TCP_NODELAY, 1);
+                        // res is either a real fd (regular) or file index (direct)
+                        const conn_idx: usize = @intCast(@as(u32, @bitCast(@as(i32, res))));
 
-                        const uidx: usize = @intCast(client_fd);
-                        if (uidx < MAX_CONNS) {
+                        // Set TCP_NODELAY only for regular fds (direct fds don't expose real fd)
+                        if (!use_direct_fds) {
+                            setSockOptInt(res, IPPROTO_TCP, TCP_NODELAY, 1);
+                        }
+
+                        if (conn_idx < MAX_CONNS) {
                             const st = alloc.create(ConnState) catch {
-                                posix.close(@intCast(@as(u32, @bitCast(client_fd))));
+                                if (use_direct_fds) {
+                                    _ = ring.close_direct(packUserData(.close, @as(i32, res)), @intCast(@as(u32, @bitCast(@as(i32, res))))) catch {};
+                                    needs_submit = true;
+                                } else {
+                                    posix.close(@intCast(@as(u32, @bitCast(@as(i32, res)))));
+                                }
                                 continue;
                             };
                             st.* = ConnState.init(alloc);
-                            conns[uidx] = st;
+                            conns[conn_idx] = st;
 
                             // Arm multishot recv using buffer group
-                            _ = buf_group.recv_multishot(
-                                packUserData(.recv, client_fd),
-                                client_fd,
+                            const recv_sqe = buf_group.recv_multishot(
+                                packUserData(.recv, @as(i32, res)),
+                                @as(i32, res),
                                 0,
                             ) catch {
                                 st.deinit();
                                 alloc.destroy(st);
-                                conns[uidx] = null;
-                                posix.close(@intCast(@as(u32, @bitCast(client_fd))));
+                                conns[conn_idx] = null;
+                                if (use_direct_fds) {
+                                    _ = ring.close_direct(packUserData(.close, @as(i32, res)), @intCast(@as(u32, @bitCast(@as(i32, res))))) catch {};
+                                    needs_submit = true;
+                                } else {
+                                    posix.close(@intCast(@as(u32, @bitCast(@as(i32, res)))));
+                                }
                                 continue;
                             };
+
+                            // Set IOSQE_FIXED_FILE for direct fd mode
+                            if (use_direct_fds) {
+                                recv_sqe.flags |= IOSQE_FIXED_FILE;
+                            }
+
                             needs_submit = true;
                         } else {
-                            posix.close(@intCast(@as(u32, @bitCast(client_fd))));
+                            if (use_direct_fds) {
+                                _ = ring.close_direct(packUserData(.close, @as(i32, res)), @intCast(@as(u32, @bitCast(@as(i32, res))))) catch {};
+                                needs_submit = true;
+                            } else {
+                                posix.close(@intCast(@as(u32, @bitCast(@as(i32, res)))));
+                            }
                         }
                     }
 
                     // Re-arm multishot accept if kernel dropped it
                     if (cqe.flags & IORING_CQE_F_MORE == 0) {
-                        armMultishotAccept(&ring, sock) catch {};
+                        if (use_direct_fds) {
+                            armMultishotAcceptDirect(&ring, sock) catch {};
+                        } else {
+                            armMultishotAccept(&ring, sock) catch {};
+                        }
                         needs_submit = true;
                     }
                 },
@@ -312,7 +357,12 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                                 alloc.destroy(st);
                                 conns[uidx] = null;
                             }
-                            posix.close(@intCast(@as(u32, @bitCast(fd))));
+                            if (use_direct_fds) {
+                                _ = ring.close_direct(packUserData(.close, fd), @intCast(@as(u32, @bitCast(fd)))) catch {};
+                                needs_submit = true;
+                            } else {
+                                posix.close(@intCast(@as(u32, @bitCast(fd))));
+                            }
                         }
                         continue;
                     }
@@ -368,7 +418,7 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
 
                             // Submit send if we have data and no send in flight
                             if (st.write_buf.items.len > st.write_off and !st.send_inflight) {
-                                armSend(&ring, fd, st.write_buf.items[st.write_off..]) catch {};
+                                armSendEx(&ring, fd, st.write_buf.items[st.write_off..], use_direct_fds) catch {};
                                 st.send_inflight = true;
                                 needs_submit = true;
                             }
@@ -384,11 +434,14 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                     // Re-arm recv if multishot was dropped
                     if (!has_more) {
                         if (uidx < MAX_CONNS and conns[uidx] != null) {
-                            _ = buf_group.recv_multishot(
+                            const re_recv_sqe = buf_group.recv_multishot(
                                 packUserData(.recv, fd),
                                 fd,
                                 0,
-                            ) catch {};
+                            ) catch continue;
+                            if (use_direct_fds) {
+                                re_recv_sqe.flags |= IOSQE_FIXED_FILE;
+                            }
                             needs_submit = true;
                         }
                     }
@@ -404,7 +457,12 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                         st.deinit();
                         alloc.destroy(st);
                         conns[uidx] = null;
-                        posix.close(@intCast(@as(u32, @bitCast(fd))));
+                        if (use_direct_fds) {
+                            _ = ring.close_direct(packUserData(.close, fd), @intCast(@as(u32, @bitCast(fd)))) catch {};
+                            needs_submit = true;
+                        } else {
+                            posix.close(@intCast(@as(u32, @bitCast(fd))));
+                        }
                         continue;
                     }
 
@@ -412,7 +470,7 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
 
                     if (st.write_off < st.write_buf.items.len) {
                         // Partial send — resubmit remainder
-                        armSend(&ring, fd, st.write_buf.items[st.write_off..]) catch {
+                        armSendEx(&ring, fd, st.write_buf.items[st.write_off..], use_direct_fds) catch {
                             st.send_inflight = false;
                         };
                         needs_submit = true;
@@ -426,9 +484,19 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                             st.deinit();
                             alloc.destroy(st);
                             conns[uidx] = null;
-                            posix.close(@intCast(@as(u32, @bitCast(fd))));
+                            if (use_direct_fds) {
+                                _ = ring.close_direct(packUserData(.close, fd), @intCast(@as(u32, @bitCast(fd)))) catch {};
+                                needs_submit = true;
+                            } else {
+                                posix.close(@intCast(@as(u32, @bitCast(fd))));
+                            }
                         }
                     }
+                },
+
+                .close => {
+                    // close_direct completion — fd slot is now free in the registered table
+                    // Nothing to do; the kernel has already freed the slot
                 },
 
                 .cancel => {
@@ -453,8 +521,20 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
             st.deinit();
             alloc.destroy(st);
             conns[i] = null;
-            posix.close(@intCast(i));
+            if (use_direct_fds) {
+                _ = ring.close_direct(packUserData(.close, @as(i32, @intCast(i))), @intCast(i)) catch {};
+            } else {
+                posix.close(@intCast(i));
+            }
         }
+    }
+    // Submit any pending close_direct operations during cleanup
+    if (use_direct_fds) {
+        _ = ring.submit() catch {};
+    }
+    // Unregister file table (ring deinit will handle this too, but be explicit)
+    if (use_direct_fds) {
+        ring.unregister_files() catch {};
     }
 }
 
@@ -470,13 +550,26 @@ fn armMultishotAccept(ring: *IoUring, sock: i32) !void {
     );
 }
 
-fn armSend(ring: *IoUring, fd: i32, data: []const u8) !void {
-    _ = try ring.send(
+fn armMultishotAcceptDirect(ring: *IoUring, sock: i32) !void {
+    _ = try ring.accept_multishot_direct(
+        packUserData(.accept, sock),
+        sock,
+        null,
+        null,
+        SOCK_NONBLOCK,
+    );
+}
+
+fn armSendEx(ring: *IoUring, fd: i32, data: []const u8, fixed_file: bool) !void {
+    const sqe = try ring.send(
         packUserData(.send, fd),
         fd,
         data,
         MSG_NOSIGNAL,
     );
+    if (fixed_file) {
+        sqe.flags |= IOSQE_FIXED_FILE;
+    }
 }
 
 fn setSockOptInt(fd: i32, level: i32, optname: u32, val: c_int) void {
