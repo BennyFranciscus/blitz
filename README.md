@@ -736,6 +736,7 @@ Benchmarked on [HttpArena](https://github.com/MDA2AV/HttpArena) — 64-core AMD 
 | Compression (gzip) | 4096 | **95K** req/s | 4.5 GiB |
 | Noisy (mixed traffic) | 4096 | **1.99M** req/s | 4.1 GiB |
 | Limited-conn (r=10) | 4096 | **1.38M** req/s | 4.1 GiB |
+| WebSocket echo (p=16) | 4096 | **50.2M** msg/s | 4.1 GiB |
 
 **#3 on HttpArena baseline**, behind ringzero (C, io_uring) at 3.43M and h2o (C) at 3.16M. Ahead of nginx (3.03M), hyper/Rust (2.94M), actix/Rust (2.71M), and drogon/C++ (2.25M).
 
