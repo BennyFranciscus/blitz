@@ -13,6 +13,7 @@ const compress_mod = @import("compress.zig");
 const log_mod = @import("log.zig");
 const websocket = @import("websocket.zig");
 const SpscQueue = @import("spsc.zig").SpscQueue;
+const simd = @import("simd.zig");
 const Request = types.Request;
 const Response = types.Response;
 
@@ -21,8 +22,8 @@ const MAX_CONNS: usize = 65536;
 const ACCEPTOR_RING_ENTRIES: u16 = 4096;
 const REACTOR_RING_ENTRIES: u16 = 8192;
 const CQE_BATCH: usize = 256;
-const RECV_BUF_SIZE: u32 = 4096;
-const RECV_BUF_COUNT: u16 = 2048; // must be power of 2 (2048 × 4KB = 8MB per reactor)
+const RECV_BUF_SIZE: u32 = 16384;
+const RECV_BUF_COUNT: u16 = 1024; // must be power of 2 (1024 × 16KB = 16MB per reactor)
 const COMPRESS_BUF_SIZE: usize = 131072; // 128KB
 const BUFFER_GROUP_ID: u16 = 0;
 const SPSC_CAPACITY: usize = 8192; // power of 2
@@ -754,7 +755,7 @@ fn reactorThread(
                     while (off < cur_len) {
                         const result = parser.parse(cur_data[off..cur_len]) orelse {
                             const remaining = cur_data[off..cur_len];
-                            if (mem.indexOf(u8, remaining, "\r\n\r\n")) |hdr_end| {
+                            if (simd.findHeaderEnd(remaining)) |hdr_end| {
                                 const hdr_data = remaining[0 .. hdr_end + 4];
                                 if (parser.parseHeaders(hdr_data)) |hdr_result| {
                                     if (hdr_result.content_length != null and hdr_result.content_length.? > BODY_DISCARD_THRESHOLD) {
@@ -1052,10 +1053,10 @@ fn setSockOptInt(fd: i32, level: i32, optname: u32, val: c_int) void {
 pub fn detectContentLength(headers: []const u8) ?usize {
     var pos: usize = 0;
     while (pos < headers.len) {
-        const line_end = mem.indexOf(u8, headers[pos..], "\r\n") orelse headers.len - pos;
+        const line_end = simd.findCRLF(headers[pos..]) orelse headers.len - pos;
         const line = headers[pos .. pos + line_end];
         if (line.len > 16) {
-            const colon = mem.indexOfScalar(u8, line, ':') orelse {
+            const colon = simd.findByte(line, ':') orelse {
                 pos += line_end + 2;
                 continue;
             };

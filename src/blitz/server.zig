@@ -8,6 +8,7 @@ const types = @import("types.zig");
 const parser = @import("parser.zig");
 const Router = @import("router.zig").Router;
 const pool_mod = @import("pool.zig");
+const simd = @import("simd.zig");
 const ConnPool = pool_mod.ConnPool;
 const ConnState = pool_mod.ConnState;
 const compress_mod = @import("compress.zig");
@@ -424,7 +425,7 @@ fn workerThread(router: *Router, config: Config, is_primary: bool) void {
                     while (off < cur_len) {
                         const result = parser.parse(cur_data[off..cur_len]) orelse {
                             const remaining = cur_data[off..cur_len];
-                            if (mem.indexOf(u8, remaining, "\r\n\r\n")) |hdr_end| {
+                            if (simd.findHeaderEnd(remaining)) |hdr_end| {
                                 // Try body discard for large bodies
                                 const hdr_data = remaining[0 .. hdr_end + 4];
                                 if (parser.parseHeaders(hdr_data)) |hdr_result| {
@@ -683,10 +684,10 @@ fn setSockOptInt(fd: i32, level: i32, optname: u32, val: c_int) void {
 pub fn detectContentLength(headers: []const u8) ?usize {
     var pos: usize = 0;
     while (pos < headers.len) {
-        const line_end = mem.indexOf(u8, headers[pos..], "\r\n") orelse headers.len - pos;
+        const line_end = simd.findCRLF(headers[pos..]) orelse headers.len - pos;
         const line = headers[pos .. pos + line_end];
         if (line.len > 16) { // "Content-Length: " = 16 chars
-            const colon = mem.indexOfScalar(u8, line, ':') orelse {
+            const colon = simd.findByte(line, ':') orelse {
                 pos += line_end + 2;
                 continue;
             };

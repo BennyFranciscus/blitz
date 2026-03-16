@@ -46,6 +46,7 @@ pub const log_mod = @import("blitz/log.zig");
 pub const uring_mod = @import("blitz/uring.zig");
 pub const websocket_mod = @import("blitz/websocket.zig");
 pub const spsc_mod = @import("blitz/spsc.zig");
+pub const simd_mod = @import("blitz/simd.zig");
 
 // Re-export main types for convenience
 pub const Request = types.Request;
@@ -169,4 +170,5 @@ test {
     _ = @import("blitz/log.zig");
     _ = @import("blitz/websocket.zig");
     _ = @import("blitz/spsc.zig");
+    _ = @import("blitz/simd.zig");
 }
