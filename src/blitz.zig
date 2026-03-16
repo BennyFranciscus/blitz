@@ -52,6 +52,7 @@ pub const ratelimit_mod = @import("blitz/ratelimit.zig");
 pub const json_parse_mod = @import("blitz/json_parse.zig");
 pub const timeout_mod = @import("blitz/timeout.zig");
 pub const sqlite_mod = @import("blitz/sqlite.zig");
+pub const template_mod = @import("blitz/template.zig");
 
 // Re-export main types for convenience
 pub const Request = types.Request;
@@ -191,6 +192,12 @@ pub const SqliteDb = sqlite_mod.Db;
 pub const SqliteStatement = sqlite_mod.Statement;
 pub const SqliteColumnType = sqlite_mod.ColumnType;
 
+// Template Engine
+pub const Template = template_mod.Template;
+pub const RuntimeTemplate = template_mod.RuntimeTemplate;
+pub const parseRuntimeTemplate = template_mod.parseRuntime;
+pub const htmlEscapeInto = template_mod.htmlEscapeInto;
+
 // Tests (pulled in by `zig build test`)
 test {
     _ = @import("blitz/tests.zig");
@@ -209,4 +216,5 @@ test {
     _ = @import("blitz/json_parse.zig");
     _ = @import("blitz/timeout.zig");
     _ = @import("blitz/sqlite.zig");
+    _ = @import("blitz/template.zig");
 }

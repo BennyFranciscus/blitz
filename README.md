@@ -24,6 +24,7 @@
 - 🔌 **Graceful shutdown** — SIGTERM/SIGINT handling, connection draining, Docker-ready
 - 📝 **Structured logging** — text or JSON format, latency tracking, slow request detection
 - 🗄️ **SQLite integration** — zero-overhead C interop wrapper, per-thread connections, prepared statements
+- 🎨 **Template engine** — comptime-powered Mustache-like templates with HTML auto-escaping, conditionals, loops
 
 ## Quick Start
 
@@ -142,6 +143,38 @@ Requires `libsqlite3-dev` at build time. Add to `build.zig`:
 exe.linkSystemLibrary("sqlite3");
 ```
 
+## Template Engine
+
+Comptime-powered Mustache-like templates — parsed at compile time, zero allocations at runtime:
+
+```zig
+const blitz = @import("blitz");
+
+// Templates are compiled at comptime — zero parsing overhead at runtime
+const page = blitz.Template.compile(
+    \\<h1>{{ title }}</h1>
+    \\{{# if logged_in }}<p>Welcome back, {{ username }}!</p>{{/ if }}
+    \\{{# unless logged_in }}<p>Please <a href="/login">log in</a>.</p>{{/ unless }}
+    \\<ul>{{# each items }}<li>{{ . }}</li>{{/ each }}</ul>
+);
+
+fn handler(_: *blitz.Request, res: *blitz.Response) void {
+    const items = [_][]const u8{ "Routing", "Middleware", "WebSocket" };
+    var buf: [4096]u8 = undefined;
+    const html = page.render(&buf, .{
+        .title = "Blitz Features",
+        .logged_in = true,
+        .username = "Alice",
+        .items = @as([]const []const u8, &items),
+    }) orelse return;
+    _ = res.html(html);
+}
+```
+
+**Syntax:** `{{ var }}` (HTML-escaped), `{{{ var }}}` (raw), `{{# if cond }}...{{/ if }}`, `{{# unless cond }}...{{/ unless }}`, `{{# each list }}{{ . }}{{/ each }}`, `{{! comment }}`
+
+Runtime templates also supported via `blitz.parseRuntimeTemplate()` for user-provided templates.
+
 ## Documentation
 
 📖 **[Full API Documentation](https://bennyfranciscus.github.io/blitz/)** — routing, middleware, JSON, WebSocket, compression, and more.
@@ -150,7 +183,7 @@ exe.linkSystemLibrary("sqlite3");
 
 ```bash
 zig build -Doptimize=ReleaseFast    # build
-zig build test                       # 287 unit tests
+zig build test                       # 308 unit tests
 
 # Run with epoll (default)
 ./zig-out/bin/blitz
