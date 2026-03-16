@@ -47,6 +47,8 @@ pub const uring_mod = @import("blitz/uring.zig");
 pub const websocket_mod = @import("blitz/websocket.zig");
 pub const spsc_mod = @import("blitz/spsc.zig");
 pub const simd_mod = @import("blitz/simd.zig");
+pub const cors_mod = @import("blitz/cors.zig");
+pub const ratelimit_mod = @import("blitz/ratelimit.zig");
 
 // Re-export main types for convenience
 pub const Request = types.Request;
@@ -158,6 +160,16 @@ pub const parse = parser_mod.parse;
 // SPSC Queue
 pub const SpscQueue = spsc_mod.SpscQueue;
 
+// CORS
+pub const Cors = cors_mod;
+pub const CorsConfig = cors_mod.CorsConfig;
+
+// Rate Limiting
+pub const RateLimit = ratelimit_mod;
+pub const RateLimiter = ratelimit_mod.RateLimiter;
+pub const RateLimitConfig = ratelimit_mod.RateLimitConfig;
+pub const clientIp = ratelimit_mod.clientIp;
+
 // Tests (pulled in by `zig build test`)
 test {
     _ = @import("blitz/tests.zig");
@@ -171,4 +183,6 @@ test {
     _ = @import("blitz/websocket.zig");
     _ = @import("blitz/spsc.zig");
     _ = @import("blitz/simd.zig");
+    _ = @import("blitz/cors.zig");
+    _ = @import("blitz/ratelimit.zig");
 }

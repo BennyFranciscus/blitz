@@ -22,8 +22,22 @@ pub fn build(b: *std.Build) void {
     example.root_module.addImport("blitz", blitz_mod);
     example.linkLibC();
     const install_example = b.addInstallArtifact(example, .{});
-    const example_step = b.step("example", "Build the example app");
+    const example_step = b.step("example", "Build the hello example");
     example_step.dependOn(&install_example.step);
+
+    // REST API example
+    const rest_api = b.addExecutable(.{
+        .name = "rest-api",
+        .root_source_file = b.path("examples/rest-api.zig"),
+        .target = target,
+        .optimize = optimize,
+        .single_threaded = false,
+    });
+    rest_api.root_module.addImport("blitz", blitz_mod);
+    rest_api.linkLibC();
+    const install_rest = b.addInstallArtifact(rest_api, .{});
+    const rest_step = b.step("rest-api", "Build the REST API example");
+    rest_step.dependOn(&install_rest.step);
 
     // HttpArena benchmark server
     const exe = b.addExecutable(.{

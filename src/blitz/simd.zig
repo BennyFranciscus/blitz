@@ -198,7 +198,7 @@ test "findHeaderEnd at start" {
 test "findHeaderEnd multiple CRs" {
     const data = "Header1: val\r\nHeader2: val\r\n\r\nbody";
     const pos = findHeaderEnd(data).?;
-    try std.testing.expectEqual(@as(usize, 27), pos);
+    try std.testing.expectEqual(@as(usize, 26), pos);
 }
 
 test "findCRLF basic" {

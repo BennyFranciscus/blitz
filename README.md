@@ -28,6 +28,8 @@ A blazing-fast HTTP/1.1 micro web framework for Zig.
 - **Graceful shutdown** — handles SIGTERM/SIGINT, drains in-flight connections, configurable timeout
 - **Keep-alive timeout** — automatic idle connection cleanup via timerfd
 - **Structured errors** — consistent JSON error responses out of the box
+- **CORS middleware** — configurable cross-origin resource sharing with preflight handling
+- **Rate limiting** — token bucket per IP with standard `Retry-After` headers
 - **Clean API** — define routes and handlers, blitz handles the rest
 
 ## Installation
@@ -107,12 +109,15 @@ Middleware functions return `true` to continue, `false` to short-circuit (e.g., 
 **Global middleware** runs on every request:
 
 ```zig
-fn cors(_: *blitz.Request, res: *blitz.Response) bool {
-    res.headers.set("Access-Control-Allow-Origin", "*");
+// Use the built-in CORS middleware
+router.use(blitz.Cors.permissive());
+
+// Or write your own
+fn timing(_: *blitz.Request, res: *blitz.Response) bool {
+    res.headers.set("Server-Timing", "middleware");
     return true;
 }
-
-router.use(cors); // Runs on all requests
+router.use(timing);
 ```
 
 **Per-route middleware** runs only on matching routes:
@@ -144,6 +149,49 @@ admin.get("/stats", adminStats);
 **Execution order:** global middleware → per-route middleware (collected along the matched path) → handler.
 
 Middleware on parent paths runs before middleware on child paths, so you can layer auth, logging, rate limiting etc. at different levels of your route tree.
+
+### CORS
+
+Built-in CORS middleware with configurable origins, methods, and preflight handling:
+
+```zig
+// Permissive CORS — allow all origins
+router.use(blitz.Cors.permissive());
+
+// Configured CORS — specific origins with credentials
+router.use(blitz.Cors.middleware(.{
+    .origins = &.{ "https://myapp.com", "http://localhost:3000" },
+    .allow_credentials = true,
+    .headers = "Content-Type, Authorization, X-Request-ID",
+    .max_age = 3600,
+    .max_age_str = "3600",
+}));
+```
+
+The CORS middleware automatically handles OPTIONS preflight requests (returns 204 with appropriate headers) and sets `Access-Control-Allow-Origin`, `Vary`, and `Access-Control-Allow-Credentials` headers on all responses.
+
+When `allow_credentials` is true, the middleware echoes the request's `Origin` header instead of using `*` (as required by the spec).
+
+### Rate Limiting
+
+Token-bucket rate limiter with per-IP tracking and standard HTTP headers:
+
+```zig
+// Initialize the rate limiter
+var limiter = try blitz.RateLimiter.init(allocator, .{
+    .max_requests = 100,  // requests per window
+    .window_secs = 60,    // window duration
+    .max_clients = 4096,  // max tracked IPs
+});
+
+// Use in handlers
+fn myHandler(req: *blitz.Request, res: *blitz.Response) void {
+    if (!blitz.RateLimit.allow(&limiter, req, res)) return;
+    // ... handle request normally
+}
+```
+
+The rate limiter extracts client IPs from `X-Forwarded-For` or `X-Real-IP` headers (for reverse proxy setups), and sets `X-RateLimit-Remaining` and `Retry-After` headers automatically.
 
 ### Route Groups
 

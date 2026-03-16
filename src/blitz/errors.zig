@@ -27,6 +27,7 @@ const err_401 = "{\"error\":{\"status\":401,\"message\":\"Unauthorized\"}}";
 const err_403 = "{\"error\":{\"status\":403,\"message\":\"Forbidden\"}}";
 const err_404 = "{\"error\":{\"status\":404,\"message\":\"Not Found\"}}";
 const err_405 = "{\"error\":{\"status\":405,\"message\":\"Method Not Allowed\"}}";
+const err_429 = "{\"error\":{\"status\":429,\"message\":\"Too Many Requests\"}}";
 const err_500 = "{\"error\":{\"status\":500,\"message\":\"Internal Server Error\"}}";
 
 /// Send a structured JSON error response.
@@ -45,6 +46,7 @@ pub fn sendError(res: *Response, status: StatusCode, message: []const u8) void {
             .forbidden => err_403,
             .not_found => err_404,
             .method_not_allowed => err_405,
+            .too_many_requests => err_429,
             .internal_server_error => err_500,
             else => err_500,
         };

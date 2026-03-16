@@ -23,7 +23,7 @@ const ACCEPTOR_RING_ENTRIES: u16 = 4096;
 const REACTOR_RING_ENTRIES: u16 = 8192;
 const CQE_BATCH: usize = 256;
 const RECV_BUF_SIZE: u32 = 16384;
-const RECV_BUF_COUNT: u16 = 4096; // must be power of 2 (4096 × 16KB = 64MB per reactor)
+const RECV_BUF_COUNT: u16 = 2048; // must be power of 2 (2048 × 16KB = 32MB per reactor)
 const COMPRESS_BUF_SIZE: usize = 131072; // 128KB
 const BUFFER_GROUP_ID: u16 = 0;
 const SPSC_CAPACITY: usize = 8192; // power of 2
