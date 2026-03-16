@@ -244,7 +244,7 @@ test "WebSocket accept key" {
     // RFC 6455 §1.3 example: key "dGhlIHNhbXBsZSBub25jZQ=="
     var out: [28]u8 = undefined;
     acceptKey("dGhlIHNhbXBsZSBub25jZQ==", &out);
-    try std.testing.expectEqualStrings("IbKZVhPQR2E29juQcxKVbvlAzb0=", &out);
+    try std.testing.expectEqualStrings("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", &out);
 }
 
 test "parseFrame — unmasked text" {
@@ -329,7 +329,7 @@ test "buildUpgradeResponse" {
     try std.testing.expect(mem.startsWith(u8, resp_str, "HTTP/1.1 101 Switching Protocols\r\n"));
     try std.testing.expect(mem.indexOf(u8, resp_str, "Upgrade: websocket\r\n") != null);
     try std.testing.expect(mem.indexOf(u8, resp_str, "Connection: Upgrade\r\n") != null);
-    try std.testing.expect(mem.indexOf(u8, resp_str, "IbKZVhPQR2E29juQcxKVbvlAzb0=") != null);
+    try std.testing.expect(mem.indexOf(u8, resp_str, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") != null);
     try std.testing.expect(mem.endsWith(u8, resp_str, "\r\n\r\n"));
 }
 
