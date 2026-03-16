@@ -703,6 +703,22 @@ examples/
 - **Graceful shutdown** — self-pipe trick for signal delivery, atomic flag across workers, connection draining with configurable timeout
 - **io_uring backend** — dedicated acceptor thread + reactor threads with lock-free SPSC queue fd handoff (matches ringzero architecture), kernel-managed buffer ring for zero-SQE recv buffer recycling, zero-copy send (`send_zc`), connection pooling per reactor, SINGLE_ISSUER + DEFER_TASKRUN
 
+## Performance
+
+Benchmarked on [HttpArena](https://github.com/MDA2AV/HttpArena) — 64-core AMD Threadripper, dedicated hardware.
+
+| Profile | Connections | Throughput |
+|---------|------------|------------|
+| Baseline | 4096 | **3.06M** req/s |
+| Pipelined (p=16) | 4096 | **40.1M** req/s |
+| JSON (8.4KB body) | 4096 | **932K** req/s |
+| Upload (20MB body) | 64 | **1,943** req/s |
+| Compression (gzip) | 4096 | **2.92M** req/s |
+| WebSocket echo | 4096 | **49.4M** msg/s |
+| Noisy (mixed traffic) | 4096 | **2.57M** req/s |
+
+Scales well at high concurrency — baseline holds 2.88M req/s at 16,384 connections.
+
 ## Building
 
 ```bash
@@ -715,15 +731,21 @@ zig build -Doptimize=ReleaseFast
 zig build test
 ```
 
+218 unit tests across all modules.
+
 ## Running
 
 ```bash
+# epoll (default)
 ./zig-out/bin/blitz
+
+# io_uring (requires kernel 5.18+, recommended 6.1+)
+BLITZ_URING=1 ./zig-out/bin/blitz
 ```
 
 ## HttpArena
 
-blitz is built to compete in [HttpArena](https://github.com/MDA2AV/HttpArena) benchmarks. See `meta.json` for the benchmark configuration.
+blitz competes in [HttpArena](https://github.com/MDA2AV/HttpArena) — a framework benchmarking platform with 16 test profiles. Currently subscribed to: baseline, pipelined, noisy, limited-conn, json, upload, compression, echo-ws.
 
 ## License
 
