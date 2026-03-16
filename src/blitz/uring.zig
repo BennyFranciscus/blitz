@@ -353,13 +353,20 @@ pub const UringServer = struct {
 // ACCEPTOR THREAD — dedicated accept loop, distributes fds round-robin
 // ═══════════════════════════════════════════════════════════════════
 
+fn logErr(comptime msg: []const u8) void {
+    _ = posix.write(2, msg ++ "\n") catch {};
+}
+
 fn acceptorThread(
     listen_fd: i32,
     queues: []SpscQueue(i32),
     n_reactors: usize,
 ) void {
     // Acceptor uses a simple io_uring ring — just multishot accept + signal pipe
-    var ring = IoUring.init(ACCEPTOR_RING_ENTRIES, 0) catch return;
+    var ring = IoUring.init(ACCEPTOR_RING_ENTRIES, 0) catch {
+        logErr("uring: acceptor ring init failed");
+        return;
+    };
     defer ring.deinit();
 
     // Arm multishot accept
@@ -369,8 +376,14 @@ fn acceptorThread(
         null,
         null,
         SOCK_NONBLOCK,
-    ) catch return;
-    _ = ring.submit() catch return;
+    ) catch {
+        logErr("uring: multishot accept failed");
+        return;
+    };
+    _ = ring.submit() catch {
+        logErr("uring: submit failed");
+        return;
+    };
 
     // Monitor signal pipe for shutdown
     if (signal_pipe[0] >= 0) {
@@ -479,7 +492,10 @@ fn reactorThread(
             .sq_thread_idle = 1000,
         });
         break :blk IoUring.init_params(REACTOR_RING_ENTRIES, &params2) catch blk2: {
-            break :blk2 IoUring.init(REACTOR_RING_ENTRIES, 0) catch return;
+            break :blk2 IoUring.init(REACTOR_RING_ENTRIES, 0) catch {
+                logErr("uring: reactor ring init failed");
+                return;
+            };
         };
     };
     defer ring.deinit();
@@ -489,10 +505,16 @@ fn reactorThread(
 
     // Buffer ring for recv
     const slab_size: usize = @as(usize, RECV_BUF_COUNT) * @as(usize, RECV_BUF_SIZE);
-    const slab = alloc.alloc(u8, slab_size) catch return;
+    const slab = alloc.alloc(u8, slab_size) catch {
+        logErr("uring: slab alloc failed");
+        return;
+    };
     defer alloc.free(slab);
 
-    var buf_group = BufferGroup.init(&ring, BUFFER_GROUP_ID, slab, RECV_BUF_SIZE, RECV_BUF_COUNT) catch return;
+    var buf_group = BufferGroup.init(&ring, BUFFER_GROUP_ID, slab, RECV_BUF_SIZE, RECV_BUF_COUNT) catch {
+        logErr("uring: buffer group init failed");
+        return;
+    };
     defer buf_group.deinit();
 
     // Connection state (sparse, indexed by fd)
@@ -507,6 +529,7 @@ fn reactorThread(
 
     // Main reactor event loop
     var cqes: [CQE_BATCH]linux.io_uring_cqe = undefined;
+    var has_active_conns: bool = false;
 
     while (!shutdown_flag.load(.acquire)) {
         // 1. Drain new connections from SPSC queue
@@ -543,15 +566,24 @@ fn reactorThread(
             drained += 1;
         }
         if (drained > 0) {
+            has_active_conns = true;
             _ = ring.submit() catch {};
         }
 
-        // 2. Process CQEs
-        const count = ring.copy_cqes(&cqes, 1) catch |err| {
+        // 2. Process CQEs — use wait_nr=1 only if we have armed SQEs,
+        //    otherwise poll non-blocking to avoid blocking on empty ring
+        const wait_nr: u32 = if (drained > 0 or has_active_conns) 1 else 0;
+        const count = ring.copy_cqes(&cqes, wait_nr) catch |err| {
             if (err == error.SignalInterrupt) continue;
             break;
         };
-        if (count == 0) continue;
+        if (count == 0) {
+            // No CQEs — brief yield to avoid busy-spin when no connections
+            if (!has_active_conns) {
+                std.time.sleep(100_000); // 100µs
+            }
+            continue;
+        }
 
         var compress_buf: [COMPRESS_BUF_SIZE]u8 = undefined;
         var needs_submit = false;
