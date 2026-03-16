@@ -1956,3 +1956,169 @@ test "ConnState.reset clears fd and last_active" {
     try testing.expectEqual(@as(i32, -1), st.fd);
     try testing.expectEqual(@as(i64, 0), st.last_active);
 }
+
+// Dynamic buffer promotion tests
+// ════════════════════════════════════════════════════════════════════
+
+test "ConnState.promoteToDynamic copies existing data" {
+    const alloc = std.heap.page_allocator;
+    var st = pool_mod.ConnState.init(alloc);
+    defer st.deinit();
+
+    // Write some data into the static buffer
+    @memcpy(st.read_buf[0..5], "HELLO");
+    st.read_len = 5;
+
+    // Promote to dynamic buffer (e.g., 1MB for a large upload)
+    try testing.expect(st.promoteToDynamic(alloc, 1024 * 1024));
+
+    // Dynamic buffer should have the original data
+    try testing.expect(st.dyn_buf != null);
+    try testing.expectEqual(@as(usize, 5), st.dyn_len);
+    try testing.expectEqualStrings("HELLO", st.dyn_buf.?[0..5]);
+}
+
+test "ConnState.readSlice returns dynamic when promoted" {
+    const alloc = std.heap.page_allocator;
+    var st = pool_mod.ConnState.init(alloc);
+    defer st.deinit();
+
+    // Static path
+    @memcpy(st.read_buf[0..3], "abc");
+    st.read_len = 3;
+    try testing.expectEqualStrings("abc", st.readSlice());
+
+    // Promote
+    try testing.expect(st.promoteToDynamic(alloc, 1024));
+    try testing.expectEqualStrings("abc", st.readSlice());
+
+    // Write more into dynamic buffer
+    @memcpy(st.dyn_buf.?[3..6], "def");
+    st.dyn_len = 6;
+    try testing.expectEqualStrings("abcdef", st.readSlice());
+}
+
+test "ConnState.readBufRemaining returns correct remaining" {
+    const alloc = std.heap.page_allocator;
+    var st = pool_mod.ConnState.init(alloc);
+    defer st.deinit();
+
+    // Static: should have BUF_SIZE - read_len remaining
+    st.read_len = 100;
+    const rem = st.readBufRemaining();
+    try testing.expect(rem != null);
+    try testing.expectEqual(@as(usize, 65536 - 100), rem.?.len);
+
+    // Static full: should return null
+    st.read_len = 65536;
+    try testing.expect(st.readBufRemaining() == null);
+}
+
+test "ConnState.readBufRemaining dynamic" {
+    const alloc = std.heap.page_allocator;
+    var st = pool_mod.ConnState.init(alloc);
+    defer st.deinit();
+
+    try testing.expect(st.promoteToDynamic(alloc, 2048));
+    st.dyn_len = 100;
+    const rem = st.readBufRemaining();
+    try testing.expect(rem != null);
+    try testing.expectEqual(@as(usize, 2048 - 100), rem.?.len);
+
+    // Dynamic full: should return null
+    st.dyn_len = 2048;
+    try testing.expect(st.readBufRemaining() == null);
+}
+
+test "ConnState.advanceRead works in both modes" {
+    const alloc = std.heap.page_allocator;
+    var st = pool_mod.ConnState.init(alloc);
+    defer st.deinit();
+
+    // Static mode
+    st.read_len = 10;
+    st.advanceRead(5);
+    try testing.expectEqual(@as(usize, 15), st.read_len);
+    try testing.expectEqual(@as(usize, 15), st.activeReadLen());
+
+    // Dynamic mode
+    try testing.expect(st.promoteToDynamic(alloc, 1024));
+    st.advanceRead(20);
+    try testing.expectEqual(@as(usize, 15 + 20), st.dyn_len);
+    try testing.expectEqual(@as(usize, 35), st.activeReadLen());
+}
+
+test "ConnState.revertToStatic frees dynamic buffer" {
+    const alloc = std.heap.page_allocator;
+    var st = pool_mod.ConnState.init(alloc);
+    defer st.deinit();
+
+    try testing.expect(st.promoteToDynamic(alloc, 4096));
+    try testing.expect(st.dyn_buf != null);
+
+    st.revertToStatic();
+    try testing.expect(st.dyn_buf == null);
+    try testing.expectEqual(@as(usize, 0), st.dyn_len);
+    try testing.expectEqual(@as(usize, 0), st.read_len);
+}
+
+test "ConnState.reset reverts dynamic buffer" {
+    const alloc = std.heap.page_allocator;
+    var st = pool_mod.ConnState.init(alloc);
+    defer st.deinit();
+
+    try testing.expect(st.promoteToDynamic(alloc, 4096));
+    st.dyn_len = 100;
+    st.fd = 42;
+    st.touch();
+
+    st.reset();
+    try testing.expect(st.dyn_buf == null);
+    try testing.expectEqual(@as(usize, 0), st.read_len);
+    try testing.expectEqual(@as(i32, -1), st.fd);
+}
+
+test "ConnState.promoteToDynamic preserves read_len on zero needed" {
+    const alloc = std.heap.page_allocator;
+    var st = pool_mod.ConnState.init(alloc);
+    defer st.deinit();
+
+    // Promote with zero data
+    try testing.expect(st.promoteToDynamic(alloc, 256));
+    try testing.expect(st.dyn_buf != null);
+    try testing.expectEqual(@as(usize, 0), st.dyn_len);
+}
+
+// detectContentLength tests (via server module)
+// ════════════════════════════════════════════════════════════════════
+
+test "server detectContentLength basic" {
+    const server_mod = @import("server.zig");
+    const headers = "GET /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 20971520\r\n\r\n";
+    const cl = server_mod.detectContentLength(headers);
+    try testing.expect(cl != null);
+    try testing.expectEqual(@as(usize, 20971520), cl.?);
+}
+
+test "server detectContentLength missing" {
+    const server_mod = @import("server.zig");
+    const headers = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    const cl = server_mod.detectContentLength(headers);
+    try testing.expect(cl == null);
+}
+
+test "server detectContentLength case insensitive" {
+    const server_mod = @import("server.zig");
+    const headers = "POST /api HTTP/1.1\r\ncontent-length: 1024\r\n\r\n";
+    const cl = server_mod.detectContentLength(headers);
+    try testing.expect(cl != null);
+    try testing.expectEqual(@as(usize, 1024), cl.?);
+}
+
+test "server detectContentLength zero" {
+    const server_mod = @import("server.zig");
+    const headers = "POST /api HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
+    const cl = server_mod.detectContentLength(headers);
+    try testing.expect(cl != null);
+    try testing.expectEqual(@as(usize, 0), cl.?);
+}

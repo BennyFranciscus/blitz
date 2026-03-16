@@ -558,7 +558,7 @@ fn setSockOptInt(fd: i32, level: i32, optname: u32, val: c_int) void {
 
 /// Scan raw header bytes for a Content-Length value.
 /// Returns the parsed value or null if not found.
-fn detectContentLength(headers: []const u8) ?usize {
+pub fn detectContentLength(headers: []const u8) ?usize {
     var pos: usize = 0;
     while (pos < headers.len) {
         const line_end = mem.indexOf(u8, headers[pos..], "\r\n") orelse headers.len - pos;
