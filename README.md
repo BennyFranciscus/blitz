@@ -709,13 +709,14 @@ Benchmarked on [HttpArena](https://github.com/MDA2AV/HttpArena) — 64-core AMD 
 
 | Profile | Connections | Throughput |
 |---------|------------|------------|
-| Baseline | 4096 | **3.06M** req/s |
-| Pipelined (p=16) | 4096 | **40.1M** req/s |
-| JSON (8.4KB body) | 4096 | **932K** req/s |
-| Upload (20MB body) | 64 | **1,943** req/s |
-| Compression (gzip) | 4096 | **2.92M** req/s |
-| WebSocket echo | 4096 | **49.4M** msg/s |
-| Noisy (mixed traffic) | 4096 | **2.57M** req/s |
+| Baseline | 4096 | **3.05M** req/s |
+| Pipelined (p=16) | 4096 | **39.7M** req/s |
+| JSON (8.4KB body) | 4096 | **927K** req/s |
+| Upload (20MB body) | 256 | **1,960** req/s |
+| Compression (gzip) | 4096 | **97K** req/s |
+| WebSocket echo | 4096 | **48.9M** msg/s |
+| Noisy (mixed traffic) | 4096 | **2.53M** req/s |
+| Limited-conn (r=10) | 4096 | **2.07M** req/s |
 
 Scales well at high concurrency — baseline holds 2.88M req/s at 16,384 connections.
 
