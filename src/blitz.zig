@@ -50,6 +50,7 @@ pub const simd_mod = @import("blitz/simd.zig");
 pub const cors_mod = @import("blitz/cors.zig");
 pub const ratelimit_mod = @import("blitz/ratelimit.zig");
 pub const json_parse_mod = @import("blitz/json_parse.zig");
+pub const timeout_mod = @import("blitz/timeout.zig");
 
 // Re-export main types for convenience
 pub const Request = types.Request;
@@ -83,7 +84,9 @@ pub const unauthorized = errors_mod.unauthorized;
 pub const forbidden = errors_mod.forbidden;
 pub const notFound = errors_mod.notFound;
 pub const methodNotAllowed = errors_mod.methodNotAllowed;
+pub const requestTimeout = errors_mod.requestTimeout;
 pub const internalError = errors_mod.internalError;
+pub const gatewayTimeout = errors_mod.gatewayTimeout;
 pub const jsonNotFoundHandler = errors_mod.jsonNotFoundHandler;
 pub const jsonMethodNotAllowedHandler = errors_mod.jsonMethodNotAllowedHandler;
 
@@ -177,6 +180,10 @@ pub const SharedRateLimiter = ratelimit_mod.SharedRateLimiter;
 pub const RateLimitConfig = ratelimit_mod.RateLimitConfig;
 pub const clientIp = ratelimit_mod.clientIp;
 
+// Timeout
+pub const Timeout = timeout_mod;
+pub const TimeoutConfig = timeout_mod.TimeoutConfig;
+
 // Tests (pulled in by `zig build test`)
 test {
     _ = @import("blitz/tests.zig");
@@ -193,4 +200,5 @@ test {
     _ = @import("blitz/cors.zig");
     _ = @import("blitz/ratelimit.zig");
     _ = @import("blitz/json_parse.zig");
+    _ = @import("blitz/timeout.zig");
 }

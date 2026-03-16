@@ -27,8 +27,10 @@ const err_401 = "{\"error\":{\"status\":401,\"message\":\"Unauthorized\"}}";
 const err_403 = "{\"error\":{\"status\":403,\"message\":\"Forbidden\"}}";
 const err_404 = "{\"error\":{\"status\":404,\"message\":\"Not Found\"}}";
 const err_405 = "{\"error\":{\"status\":405,\"message\":\"Method Not Allowed\"}}";
+const err_408 = "{\"error\":{\"status\":408,\"message\":\"Request Timeout\"}}";
 const err_429 = "{\"error\":{\"status\":429,\"message\":\"Too Many Requests\"}}";
 const err_500 = "{\"error\":{\"status\":500,\"message\":\"Internal Server Error\"}}";
+const err_504 = "{\"error\":{\"status\":504,\"message\":\"Gateway Timeout\"}}";
 
 /// Send a structured JSON error response.
 ///
@@ -46,8 +48,10 @@ pub fn sendError(res: *Response, status: StatusCode, message: []const u8) void {
             .forbidden => err_403,
             .not_found => err_404,
             .method_not_allowed => err_405,
+            .request_timeout => err_408,
             .too_many_requests => err_429,
             .internal_server_error => err_500,
+            .gateway_timeout => err_504,
             else => err_500,
         };
         _ = res.setStatus(status).json(body);
@@ -192,9 +196,19 @@ pub fn methodNotAllowed(res: *Response, message: []const u8) void {
     sendError(res, .method_not_allowed, message);
 }
 
+/// Convenience: 408 Request Timeout
+pub fn requestTimeout(res: *Response, message: []const u8) void {
+    sendError(res, .request_timeout, message);
+}
+
 /// Convenience: 500 Internal Server Error
 pub fn internalError(res: *Response, message: []const u8) void {
     sendError(res, .internal_server_error, message);
+}
+
+/// Convenience: 504 Gateway Timeout
+pub fn gatewayTimeout(res: *Response, message: []const u8) void {
+    sendError(res, .gateway_timeout, message);
 }
 
 /// JSON 404 handler for use with router.notFound().

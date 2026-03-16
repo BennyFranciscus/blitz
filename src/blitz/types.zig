@@ -54,9 +54,11 @@ pub const StatusCode = enum(u16) {
     not_found = 404,
     method_not_allowed = 405,
     too_many_requests = 429,
+    request_timeout = 408,
     internal_server_error = 500,
     bad_gateway = 502,
     service_unavailable = 503,
+    gateway_timeout = 504,
 
     pub fn phrase(self: StatusCode) []const u8 {
         return switch (self) {
@@ -71,10 +73,12 @@ pub const StatusCode = enum(u16) {
             .forbidden => "Forbidden",
             .not_found => "Not Found",
             .method_not_allowed => "Method Not Allowed",
+            .request_timeout => "Request Timeout",
             .too_many_requests => "Too Many Requests",
             .internal_server_error => "Internal Server Error",
             .bad_gateway => "Bad Gateway",
             .service_unavailable => "Service Unavailable",
+            .gateway_timeout => "Gateway Timeout",
         };
     }
 
@@ -140,6 +144,8 @@ pub const Request = struct {
     raw_header: []const u8,
     // Application context — set via Server/UringServer config, accessible in handlers
     ctx: ?*anyopaque = null,
+    // Deadline for timeout middleware (monotonic nanoseconds, 0 = no deadline)
+    deadline_ns: i64 = 0,
 
     pub const Params = struct {
         keys: [8][]const u8 = undefined,
